@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dea-burn-severity"
+version = "0.1.0"
+description = "CLI for DEA Sentinel-2 burn severity processing"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Digital Earth Australia", email = "dea@ga.gov.au" }]
+license = { text = "Apache-2.0" }
+dependencies = [
+    "datacube",
+    "geopandas",
+    "numpy",
+    "pandas",
+    "xarray",
+    "s3fs",
+]
+
+[project.scripts]
+dea-burn-severity = "dea_burn_severity:cli"
