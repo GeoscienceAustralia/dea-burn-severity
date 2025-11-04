@@ -16,8 +16,12 @@ dependencies = [
     "numpy",
     "pandas",
     "xarray",
+    "PyYAML",
     "s3fs",
 ]
+
+[tool.setuptools.package-data]
+dea_burn_severity = ["config/*.yaml"]
 
 [project.scripts]
 dea-burn-severity = "dea_burn_severity:cli"

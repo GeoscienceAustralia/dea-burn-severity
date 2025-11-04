@@ -19,6 +19,7 @@ odc-io==0.2.2
 odc-stac==0.3.10
 pyarrow==17.0.0
 pyproj==3.7.0
+PyYAML==6.0.2
 rasterio==1.4.1
 s3fs==2024.9.0
 scikit-learn==1.5.2

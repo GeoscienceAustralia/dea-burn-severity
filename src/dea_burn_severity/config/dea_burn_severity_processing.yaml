@@ -1,0 +1,70 @@
+polygons: s3://dea-public-data-dev/projects/burn_cube/derivative/dea_burn_severity/polygon_set/10k_sampled_fires.geojson
+output_dir: products
+max_fires: 10
+save_per_part_vectors: true
+save_per_part_rasters: true
+save_combined_per_fire: true
+force_rebuild: false
+upload_to_s3: true
+upload_to_s3_prefix: s3://dea-public-data-dev/projects/burn_cube/derivative/dea_burn_severity/result
+app_name: Burnt_Area_Mapping
+output_crs: EPSG:3577
+resolution:
+  - -10
+  - 10
+s2_products:
+  - ga_s2am_ard_3
+  - ga_s2bm_ard_3
+  - ga_s2cm_ard_3
+s2_measurements:
+  - nbart_blue
+  - nbart_green
+  - nbart_red
+  - nbart_nir_1
+  - nbart_nir_2
+  - nbart_swir_2
+  - nbart_swir_3
+  - oa_nbart_contiguity
+  - oa_s2cloudless_mask
+pre_fire_buffer_days: 50
+post_fire_start_days: 15
+post_fire_window_days: 60
+grass_classes:
+  - 3
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 21
+  - 32
+  - 33
+  - 34
+  - 35
+  - 36
+  - 39
+  - 50
+  - 51
+  - 52
+  - 53
+  - 54
+  - 57
+  - 78
+  - 79
+  - 80
+  - 81
+  - 82
+  - 83
+  - 84
+  - 85
+  - 86
+  - 87
+  - 88
+  - 89
+  - 90
+  - 91
+  - 92
+  - 94
+  - 95
+  - 96
+  - 97

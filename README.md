@@ -17,14 +17,19 @@ expects to import it directly from the environment.
 
 ```bash
 dea-burn-severity \
-  --polygons s3://bucket/path/to/fire_polygons.geojson \
-  --output-dir ./products \
-  --max-fires 5 \
-  --upload-to-s3-prefix s3://bucket/path/to/results \
-  --app-name Burnt_Area_Mapping
-```Burn_Severity
+  --config https://example.com/dea_burn_severity_processing.yaml
+```
 
 Run `dea-burn-severity --help` to inspect all options.
+
+## Configuration
+
+The packaged defaults live in `dea_burn_severity/config/dea_burn_severity_processing.yaml`. If `--config`
+is omitted those defaults are used. Provide a custom YAML file—local path, `http(s)://`
+URL, or `s3://` URI—via `--config` to override any value. CLI flags continue to override
+both the bundled and external configuration values. The YAML holds every CLI option
+(e.g. `polygons`, `output_dir`, S3 settings), so supplying an external config alone is often
+enough to run the pipeline.
 
 ## Docker
 

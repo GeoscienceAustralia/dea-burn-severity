@@ -10,12 +10,17 @@ from __future__ import annotations
 
 # Standard library imports
 import argparse
+import copy
 import os
 import shutil
 import tempfile
 import traceback
 from datetime import datetime, timedelta
-from typing import Iterable
+from importlib import resources
+from pathlib import Path
+from typing import Any, Iterable
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
 # Third-party imports
 import datacube
@@ -23,6 +28,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import xarray as xr
+import yaml
 from datacube.utils.cog import write_cog
 from datacube.utils.geometry import CRS, Geometry
 
@@ -32,85 +38,121 @@ from dea_tools.datahandling import load_ard
 from dea_tools.spatial import xr_vectorize
 
 # =========================
-# ======= CONSTANTS =======
+# ========= CONFIG ========
 # =========================
 
-# Defaults (can be overridden by CLI)
-OUTPUT_PRODUCT_DIR = "products"
-MAX_POLYGONS_TO_PROCESS = 10  # Process the first N features
-SAVE_PER_PART_GEOJSON = True  # Per-part vector outputs (debug)
-SAVE_PER_PART_RASTERS = True  # Per-part COG rasters (debug)
-SAVE_COMBINED_PER_FIRE_GEOJSON = True  # The new grouped output
-FORCE_REBUILD = False  # If True, ignore existing outputs
 
-# S3 upload defaults
-DEFAULT_S3_UPLOAD_PREFIX = (
-    "s3://dea-public-data-dev/projects/burn_cube/derivative/dea_burn_severity/result"
+def _load_default_config() -> dict[str, Any]:
+    """
+    Load the packaged default YAML configuration.
+    """
+    config_resource = resources.files("dea_burn_severity").joinpath(
+        "config/dea_burn_severity_processing.yaml"
+    )
+    with config_resource.open("r", encoding="utf-8") as stream:
+        data = yaml.safe_load(stream)
+    if not isinstance(data, dict):
+        raise RuntimeError("Default configuration must be a mapping.")
+    return data
+
+
+def _load_yaml_config(source: str | Path) -> dict[str, Any]:
+    """
+    Load a YAML configuration from a local path, HTTP(S) URL, or S3 URI.
+    """
+    if isinstance(source, Path):
+        text = source.expanduser().read_text(encoding="utf-8")
+    else:
+        parsed = urlparse(str(source))
+        scheme = parsed.scheme.lower()
+        if scheme in ("http", "https"):
+            with urlopen(str(source)) as response:
+                text = response.read().decode("utf-8")
+        elif scheme == "s3":
+            try:
+                import s3fs  # type: ignore
+            except ImportError as exc:  # pragma: no cover - runtime dependency
+                raise RuntimeError(
+                    "Reading s3:// configs requires the 's3fs' package. "
+                    "Install with: pip install s3fs"
+                ) from exc
+            fs = s3fs.S3FileSystem(anon=False)
+            with fs.open(str(source), "rb") as stream:
+                text = stream.read().decode("utf-8")
+        elif scheme in ("", "file"):
+            path = Path(parsed.path) if scheme else Path(str(source))
+            text = path.expanduser().read_text(encoding="utf-8")
+        else:
+            raise ValueError(f"Unsupported configuration scheme '{scheme}' for '{source}'.")
+    data = yaml.safe_load(text)
+    if not isinstance(data, dict):
+        raise ValueError("Configuration YAML must define a mapping at the top level.")
+    return data
+
+
+def _merge_config(base: dict[str, Any], override: dict[str, Any] | None) -> dict[str, Any]:
+    merged = copy.deepcopy(base)
+    if override:
+        merged.update(override)
+    return merged
+
+
+def _apply_config(settings: dict[str, Any]) -> None:
+    """
+    Update module-level configuration variables from the provided settings.
+    """
+    if not settings.get("polygons"):
+        raise ValueError("Configuration must include a non-empty 'polygons' value.")
+
+    global OUTPUT_PRODUCT_DIR, MAX_POLYGONS_TO_PROCESS
+    global SAVE_PER_PART_GEOJSON, SAVE_PER_PART_RASTERS
+    global SAVE_COMBINED_PER_FIRE_GEOJSON, FORCE_REBUILD
+    global DEFAULT_S3_UPLOAD_PREFIX, UPLOAD_TO_S3
+    global OUTPUT_CRS, RESOLUTION, S2_PRODUCTS, S2_MEASUREMENTS
+    global PRE_FIRE_BUFFER_DAYS, POST_FIRE_START_DAYS, POST_FIRE_WINDOW_DAYS
+    global GRASS_CLASSES
+
+    OUTPUT_PRODUCT_DIR = settings["output_dir"]
+    MAX_POLYGONS_TO_PROCESS = int(settings["max_fires"])
+    SAVE_PER_PART_GEOJSON = bool(settings["save_per_part_vectors"])
+    SAVE_PER_PART_RASTERS = bool(settings["save_per_part_rasters"])
+    SAVE_COMBINED_PER_FIRE_GEOJSON = bool(settings["save_combined_per_fire"])
+    FORCE_REBUILD = bool(settings.get("force_rebuild", False))
+
+    DEFAULT_S3_UPLOAD_PREFIX = settings["upload_to_s3_prefix"]
+    UPLOAD_TO_S3 = bool(settings["upload_to_s3"])
+
+    OUTPUT_CRS = settings["output_crs"]
+    resolution_values = list(settings["resolution"])
+    if len(resolution_values) != 2:
+        raise ValueError("Configuration 'resolution' must contain exactly two values.")
+    RESOLUTION = (resolution_values[0], resolution_values[1])
+    S2_PRODUCTS = list(settings["s2_products"])
+    S2_MEASUREMENTS = list(settings["s2_measurements"])
+
+    PRE_FIRE_BUFFER_DAYS = int(settings["pre_fire_buffer_days"])
+    POST_FIRE_START_DAYS = int(settings["post_fire_start_days"])
+    POST_FIRE_WINDOW_DAYS = int(settings["post_fire_window_days"])
+
+    GRASS_CLASSES = list(settings["grass_classes"])
+
+
+DEFAULT_CONFIG = _load_default_config()
+_apply_config(DEFAULT_CONFIG)
+
+# Mapping of CLI options that can override configuration keys.
+CLI_CONFIG_KEYS = (
+    "polygons",
+    "output_dir",
+    "max_fires",
+    "save_per_part_vectors",
+    "save_per_part_rasters",
+    "save_combined_per_fire",
+    "force_rebuild",
+    "upload_to_s3_prefix",
+    "upload_to_s3",
+    "app_name",
 )
-UPLOAD_TO_S3 = True  # can be disabled via CLI
-
-# Datacube / product parameters
-OUTPUT_CRS = "EPSG:3577"
-RESOLUTION = (-10, 10)
-S2_PRODUCTS = ["ga_s2am_ard_3", "ga_s2bm_ard_3", "ga_s2cm_ard_3"]
-S2_MEASUREMENTS = [
-    "nbart_blue",
-    "nbart_green",
-    "nbart_red",
-    "nbart_nir_1",
-    "nbart_nir_2",
-    "nbart_swir_2",
-    "nbart_swir_3",
-    "oa_nbart_contiguity",
-    "oa_s2cloudless_mask",
-]
-
-# Analysis parameters
-PRE_FIRE_BUFFER_DAYS = 50
-POST_FIRE_START_DAYS = 15  # Used if no extinguish date
-POST_FIRE_WINDOW_DAYS = 60
-
-# Landcover class definitions for "grass"
-GRASS_CLASSES = [
-    3,
-    14,
-    15,
-    16,
-    17,
-    18,
-    21,
-    32,
-    33,
-    34,
-    35,
-    36,
-    39,
-    50,
-    51,
-    52,
-    53,
-    54,
-    57,
-    78,
-    79,
-    80,
-    81,
-    82,
-    83,
-    84,
-    85,
-    86,
-    87,
-    88,
-    89,
-    90,
-    91,
-    92,
-    94,
-    95,
-    96,
-    97,
-]
 
 
 # =============================
@@ -624,7 +666,7 @@ def main(
     force_rebuild: bool = FORCE_REBUILD,
     upload_to_s3: bool = UPLOAD_TO_S3,
     s3_upload_prefix: str = DEFAULT_S3_UPLOAD_PREFIX,
-    app_name: str = "Burn_Severity",
+    app_name: str = DEFAULT_CONFIG["app_name"],
 ) -> None:
     """
     Entry point for processing burn severity polygons.
@@ -832,79 +874,94 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         )
     )
     parser.add_argument(
+        "--config",
+        default=None,
+        help="Path or URL to a YAML configuration file overriding packaged defaults.",
+    )
+    parser.add_argument(
         "--polygons",
-        required=True,
+        default=None,
         help="Path to input polygons GeoJSON. Local path or S3 URI (s3://...).",
     )
     parser.add_argument(
         "--output-dir",
-        default=OUTPUT_PRODUCT_DIR,
-        help=f"Output base directory (default: {OUTPUT_PRODUCT_DIR}).",
+        default=None,
+        help=f"Output base directory (default: {DEFAULT_CONFIG['output_dir']}).",
     )
     parser.add_argument(
         "--max-fires",
         type=int,
-        default=MAX_POLYGONS_TO_PROCESS,
-        help=f"Process at most this many features (default: {MAX_POLYGONS_TO_PROCESS}).",
+        default=None,
+        help=f"Process at most this many features (default: {DEFAULT_CONFIG['max_fires']}).",
     )
     bool_action = argparse.BooleanOptionalAction if hasattr(argparse, "BooleanOptionalAction") else None
+    if bool_action is None:
+        raise RuntimeError(
+            "argparse.BooleanOptionalAction is required but unavailable. "
+            "Please use Python 3.10 or newer."
+        )
+    default_vectors = None
     parser.add_argument(
         "--save-per-part-vectors",
-        action=bool_action or "store_true",
-        default=SAVE_PER_PART_GEOJSON,
+        action=bool_action,
+        default=default_vectors,
         help=(
-            f"Save per-part GeoJSONs (default: {SAVE_PER_PART_GEOJSON}). "
+            f"Save per-part GeoJSONs (default: {DEFAULT_CONFIG['save_per_part_vectors']}). "
             f"Use --no-save-per-part-vectors to disable if supported."
         ),
     )
+    default_rasters = None
     parser.add_argument(
         "--save-per-part-rasters",
-        action=bool_action or "store_true",
-        default=SAVE_PER_PART_RASTERS,
+        action=bool_action,
+        default=default_rasters,
         help=(
-            f"Save per-part COG rasters (default: {SAVE_PER_PART_RASTERS}). "
+            f"Save per-part COG rasters (default: {DEFAULT_CONFIG['save_per_part_rasters']}). "
             f"Use --no-save-per-part-rasters to disable if supported."
         ),
     )
+    default_combined = None
     parser.add_argument(
         "--save-combined-per-fire",
-        action=bool_action or "store_true",
-        default=SAVE_COMBINED_PER_FIRE_GEOJSON,
+        action=bool_action,
+        default=default_combined,
         help=(
-            f"Save combined MultiPolygon GeoJSON per fire (default: {SAVE_COMBINED_PER_FIRE_GEOJSON}). "
+            f"Save combined MultiPolygon GeoJSON per fire (default: {DEFAULT_CONFIG['save_combined_per_fire']}). "
             f"Use --no-save-combined-per-fire to disable if supported."
         ),
     )
+    default_force = None
     parser.add_argument(
         "--force-rebuild",
-        action=bool_action or "store_true",
-        default=FORCE_REBUILD,
+        action=bool_action,
+        default=default_force,
         help=(
-            f"Rebuild even if outputs exist (default: {FORCE_REBUILD}). "
+            f"Rebuild even if outputs exist (default: {DEFAULT_CONFIG['force_rebuild']}). "
             f"Use --no-force-rebuild to skip rebuilding if supported."
         ),
     )
     parser.add_argument(
         "--upload-to-s3-prefix",
-        default=DEFAULT_S3_UPLOAD_PREFIX,
+        default=None,
         help=(
             "S3 prefix to upload each per-fire subfolder to "
-            f"(default: {DEFAULT_S3_UPLOAD_PREFIX})."
+            f"(default: {DEFAULT_CONFIG['upload_to_s3_prefix']})."
         ),
     )
+    default_upload = None
     parser.add_argument(
         "--upload-to-s3",
-        action=bool_action or "store_true",
-        default=UPLOAD_TO_S3,
+        action=bool_action,
+        default=default_upload,
         help=(
-            f"Enable S3 upload and local cleanup (default: {UPLOAD_TO_S3}). "
+            f"Enable S3 upload and local cleanup (default: {DEFAULT_CONFIG['upload_to_s3']}). "
             f"Use --no-upload-to-s3 to disable if supported."
         ),
     )
     parser.add_argument(
         "--app-name",
-        default="Burn_Severity",
-        help="Datacube app name (default: Burn_Severity).",
+        default=None,
+        help=f"Datacube app name (default: {DEFAULT_CONFIG['app_name']}).",
     )
     return parser.parse_args(argv)
 
@@ -915,17 +972,33 @@ def cli(argv: Iterable[str] | None = None) -> None:
     """
     args = parse_args(argv)
 
+    user_config: dict[str, Any] | None = None
+    if args.config:
+        try:
+            user_config = _load_yaml_config(args.config)
+        except Exception as exc:
+            raise SystemExit(f"Failed to load configuration from '{args.config}': {exc}") from exc
+
+    effective_config = _merge_config(DEFAULT_CONFIG, user_config)
+
+    for key in CLI_CONFIG_KEYS:
+        value = getattr(args, key, None)
+        if value is not None:
+            effective_config[key] = value
+
+    _apply_config(effective_config)
+
     main(
-        polygons_path=args.polygons,
-        output_dir=args.output_dir,
-        max_fires=args.max_fires,
-        save_per_part_vectors=args.save_per_part_vectors,
-        save_per_part_rasters=args.save_per_part_rasters,
-        save_combined=args.save_combined_per_fire,
-        force_rebuild=args.force_rebuild,
-        upload_to_s3=args.upload_to_s3,
-        s3_upload_prefix=args.upload_to_s3_prefix,
-        app_name=args.app_name,
+        polygons_path=effective_config["polygons"],
+        output_dir=effective_config["output_dir"],
+        max_fires=int(effective_config["max_fires"]),
+        save_per_part_vectors=bool(effective_config["save_per_part_vectors"]),
+        save_per_part_rasters=bool(effective_config["save_per_part_rasters"]),
+        save_combined=bool(effective_config["save_combined_per_fire"]),
+        force_rebuild=bool(effective_config["force_rebuild"]),
+        upload_to_s3=bool(effective_config["upload_to_s3"]),
+        s3_upload_prefix=effective_config["upload_to_s3_prefix"],
+        app_name=effective_config["app_name"],
     )
 
 
