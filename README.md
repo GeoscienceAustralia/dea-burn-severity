@@ -23,6 +23,16 @@ dea-burn-severity \
 
 Run `dea-burn-severity --help` to inspect all options.
 
+## Processing Overview
+
+- 🔄 **Config merge**: Defaults from `dea_burn_severity/config/dea_burn_severity_processing.yaml` are merged with any external YAML and CLI flags, wiring options like `output_dir`, `resolution`, acquisition windows, and S3 upload behaviour.
+- 🗺️ **Polygon prep**: Fire footprints (`polygons`) are loaded from local paths or `s3://` URIs, dissolved to one row per `fire_id` if available, and exploded into individual parts so multi-part incidents are handled piece by piece.
+- 🛰️ **Baseline vs post-fire stacks**: For each part the CLI instantiates a `datacube.Datacube`, loads Sentinel-2 ARD using `dea_tools.load_ard`, and automatically retries with looser `min_gooddata` thresholds until it finds valid pre- and post-fire observations.
+- 🌿 **Landcover-aware severity**: Landcover tiles (`ga_ls_landcover_class_cyear_3`) provide grass vs woody masks. The workflow computes delta NBR (`calculate_indices`) and applies class-specific thresholds to yield categorical severity rasters.
+- 🧪 **Quality masks & stats**: A composite debug mask flags water, cloud, and contiguity issues across the time series; per-part logs capture pixel counts, valid baselines, and missing data to support QA.
+- 🧩 **Vectorisation & exports**: Severity rasters are vectorised (`xr_vectorize`) to GeoJSON, combined per original fire, and optionally saved as Cloud-Optimised GeoTIFFs. Outputs can stay local or be uploaded to S3 (with graceful skipping when artefacts already exist).
+- ✅ **Idempotent execution**: Existing results are respected unless `--force-rebuild` is supplied, avoiding redundant reprocessing when rerunning the pipeline.
+
 ## Configuration
 
 The packaged defaults live in `dea_burn_severity/config/dea_burn_severity_processing.yaml`. If `--config`
