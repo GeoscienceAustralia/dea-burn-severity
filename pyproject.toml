@@ -30,4 +30,4 @@ include-package-data = true
 dea_burn_severity = ["config/*.yaml"]
 
 [project.scripts]
-dea-burn-severity = "dea_burn_severity:cli"
+dea-burn-severity = "dea_burn_severity.cli:cli"

@@ -21,6 +21,8 @@ RUN apt-get update && \
     apt-get autoremove && \
     rm -rf /var/lib/{apt,dpkg,cache,log}
 
+RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
+
 # Pre-install Python requirements with constraints
 RUN mkdir -p /conf
 COPY requirements.txt /conf/
@@ -38,4 +40,4 @@ RUN python3 -m pip install --no-cache-dir --extra-index-url="https://packages.de
 RUN pip freeze && pip check
 
 # Basic smoke test
-RUN python3 -m dea_burn_severity.cli --help
+RUN dea_burn_severity --help
