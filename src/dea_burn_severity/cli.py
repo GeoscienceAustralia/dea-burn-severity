@@ -9,7 +9,6 @@ by the user. The processing logic is preserved while exposing a reusable
 from __future__ import annotations
 
 # Standard library imports
-import argparse
 import copy
 import os
 import shutil
@@ -18,11 +17,12 @@ import traceback
 from datetime import datetime, timedelta
 from importlib import resources
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
 # Third-party imports
+import click
 import datacube
 import geopandas as gpd
 import numpy as np
@@ -865,124 +865,104 @@ def main(
         print(f"  Combined (group) skipped (exists): {combined_skip}")
     print("=" * 88)
 
-
-def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Burn severity mapping over Sentinel-2 ARD with grouped MultiPolygon outputs, "
-            "per-fire S3 upload, and local cleanup."
-        )
-    )
-    parser.add_argument(
-        "--config",
-        default=None,
-        help="Path or URL to a YAML configuration file overriding packaged defaults.",
-    )
-    parser.add_argument(
-        "--polygons",
-        default=None,
-        help="Path to input polygons GeoJSON. Local path or S3 URI (s3://...).",
-    )
-    parser.add_argument(
-        "--output-dir",
-        default=None,
-        help=f"Output base directory (default: {DEFAULT_CONFIG['output_dir']}).",
-    )
-    parser.add_argument(
-        "--max-fires",
-        type=int,
-        default=None,
-        help=f"Process at most this many features (default: {DEFAULT_CONFIG['max_fires']}).",
-    )
-    bool_action = argparse.BooleanOptionalAction if hasattr(argparse, "BooleanOptionalAction") else None
-    if bool_action is None:
-        raise RuntimeError(
-            "argparse.BooleanOptionalAction is required but unavailable. "
-            "Please use Python 3.10 or newer."
-        )
-    default_vectors = None
-    parser.add_argument(
-        "--save-per-part-vectors",
-        action=bool_action,
-        default=default_vectors,
-        help=(
-            f"Save per-part GeoJSONs (default: {DEFAULT_CONFIG['save_per_part_vectors']}). "
-            f"Use --no-save-per-part-vectors to disable if supported."
-        ),
-    )
-    default_rasters = None
-    parser.add_argument(
-        "--save-per-part-rasters",
-        action=bool_action,
-        default=default_rasters,
-        help=(
-            f"Save per-part COG rasters (default: {DEFAULT_CONFIG['save_per_part_rasters']}). "
-            f"Use --no-save-per-part-rasters to disable if supported."
-        ),
-    )
-    default_combined = None
-    parser.add_argument(
-        "--save-combined-per-fire",
-        action=bool_action,
-        default=default_combined,
-        help=(
-            f"Save combined MultiPolygon GeoJSON per fire (default: {DEFAULT_CONFIG['save_combined_per_fire']}). "
-            f"Use --no-save-combined-per-fire to disable if supported."
-        ),
-    )
-    default_force = None
-    parser.add_argument(
-        "--force-rebuild",
-        action=bool_action,
-        default=default_force,
-        help=(
-            f"Rebuild even if outputs exist (default: {DEFAULT_CONFIG['force_rebuild']}). "
-            f"Use --no-force-rebuild to skip rebuilding if supported."
-        ),
-    )
-    parser.add_argument(
-        "--upload-to-s3-prefix",
-        default=None,
-        help=(
-            "S3 prefix to upload each per-fire subfolder to "
-            f"(default: {DEFAULT_CONFIG['upload_to_s3_prefix']})."
-        ),
-    )
-    default_upload = None
-    parser.add_argument(
-        "--upload-to-s3",
-        action=bool_action,
-        default=default_upload,
-        help=(
-            f"Enable S3 upload and local cleanup (default: {DEFAULT_CONFIG['upload_to_s3']}). "
-            f"Use --no-upload-to-s3 to disable if supported."
-        ),
-    )
-    parser.add_argument(
-        "--app-name",
-        default=None,
-        help=f"Datacube app name (default: {DEFAULT_CONFIG['app_name']}).",
-    )
-    return parser.parse_args(argv)
+def _decorate_help(text: str, default_value: Any) -> str:
+    return f"{text} (default: {default_value})"
 
 
-def cli(argv: Iterable[str] | None = None) -> None:
+@click.command(context_settings={"auto_envvar_prefix": "DEA_BURN_SEVERITY"})
+@click.option(
+    "--config",
+    type=str,
+    default=None,
+    help="Path or URL to a YAML configuration file overriding packaged defaults.",
+)
+@click.option(
+    "--polygons",
+    type=str,
+    default=None,
+    help="Path to input polygons GeoJSON. Local path or S3 URI (s3://...).",
+)
+@click.option(
+    "--output-dir",
+    type=str,
+    default=None,
+    help=_decorate_help("Output base directory", DEFAULT_CONFIG["output_dir"]),
+)
+@click.option(
+    "--max-fires",
+    type=int,
+    default=None,
+    help=_decorate_help("Process at most this many features", DEFAULT_CONFIG["max_fires"]),
+)
+@click.option(
+    "--save-per-part-vectors",
+    type=bool,
+    default=None,
+    help=_decorate_help(
+        "Save per-part GeoJSONs", DEFAULT_CONFIG["save_per_part_vectors"]
+    ),
+)
+@click.option(
+    "--save-per-part-rasters",
+    type=bool,
+    default=None,
+    help=_decorate_help(
+        "Save per-part COG rasters", DEFAULT_CONFIG["save_per_part_rasters"]
+    ),
+)
+@click.option(
+    "--save-combined-per-fire",
+    type=bool,
+    default=None,
+    help=_decorate_help(
+        "Save combined MultiPolygon GeoJSON per fire", DEFAULT_CONFIG["save_combined_per_fire"]
+    ),
+)
+@click.option(
+    "--force-rebuild",
+    type=bool,
+    default=None,
+    help=_decorate_help("Rebuild even if outputs exist", DEFAULT_CONFIG["force_rebuild"]),
+)
+@click.option(
+    "--upload-to-s3-prefix",
+    type=str,
+    default=None,
+    help=_decorate_help(
+        "S3 prefix to upload each per-fire subfolder", DEFAULT_CONFIG["upload_to_s3_prefix"]
+    ),
+)
+@click.option(
+    "--upload-to-s3",
+    type=bool,
+    default=None,
+    help=_decorate_help(
+        "Enable S3 upload and local cleanup", DEFAULT_CONFIG["upload_to_s3"]
+    ),
+)
+@click.option(
+    "--app-name",
+    type=str,
+    default=None,
+    help=_decorate_help("Datacube app name", DEFAULT_CONFIG["app_name"]),
+)
+def cli(**kwargs: Any) -> None:
     """
     Console script entry point.
     """
-    args = parse_args(argv)
+    config_path = kwargs.pop("config", None)
 
     user_config: dict[str, Any] | None = None
-    if args.config:
+    if config_path:
         try:
-            user_config = _load_yaml_config(args.config)
+            user_config = _load_yaml_config(config_path)
         except Exception as exc:
-            raise SystemExit(f"Failed to load configuration from '{args.config}': {exc}") from exc
+            raise SystemExit(f"Failed to load configuration from '{config_path}': {exc}") from exc
 
     effective_config = _merge_config(DEFAULT_CONFIG, user_config)
 
     for key in CLI_CONFIG_KEYS:
-        value = getattr(args, key, None)
+        value = kwargs.get(key)
         if value is not None:
             effective_config[key] = value
 

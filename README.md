@@ -17,7 +17,8 @@ expects to import it directly from the environment.
 
 ```bash
 dea-burn-severity \
-  --config https://example.com/dea_burn_severity_processing.yaml
+  --config https://example.com/dea_burn_severity_processing.yaml \
+  --save-per-part-vectors false
 ```
 
 Run `dea-burn-severity --help` to inspect all options.
@@ -29,7 +30,7 @@ is omitted those defaults are used. Provide a custom YAML file—local path, `ht
 URL, or `s3://` URI—via `--config` to override any value. CLI flags continue to override
 both the bundled and external configuration values. The YAML holds every CLI option
 (e.g. `polygons`, `output_dir`, S3 settings), so supplying an external config alone is often
-enough to run the pipeline.
+enough to run the pipeline. Boolean CLI overrides accept `true`/`false`.
 
 ## Docker
 

@@ -16,6 +16,7 @@ RUN apt-get update && \
       unzip \
       python3-pip \
       libpq-dev python3-dev \
+      postgresql-client \
     && apt-get autoclean && \
     apt-get autoremove && \
     rm -rf /var/lib/{apt,dpkg,cache,log}
@@ -24,7 +25,7 @@ RUN apt-get update && \
 RUN mkdir -p /conf
 COPY requirements.txt /conf/
 COPY constraints.txt /conf/
-RUN pip install --no-cache-dir -r /conf/requirements.txt -c /conf/constraints.txt
+RUN python3 -m pip install --no-cache-dir -r /conf/requirements.txt -c /conf/constraints.txt
 
 # Copy source code and install package
 RUN mkdir -p /code
@@ -32,9 +33,9 @@ WORKDIR /code
 ADD . /code
 
 RUN echo "Installing dea-burn-severity through the Dockerfile."
-RUN pip install --no-cache-dir --extra-index-url="https://packages.dea.ga.gov.au" .
+RUN python3 -m pip install --no-cache-dir --extra-index-url="https://packages.dea.ga.gov.au" .
 
 RUN pip freeze && pip check
 
 # Basic smoke test
-RUN dea-burn-severity --help
+RUN python3 -m dea_burn_severity.cli --help
