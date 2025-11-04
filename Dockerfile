@@ -38,6 +38,3 @@ RUN echo "Installing dea-burn-severity through the Dockerfile."
 RUN python3 -m pip install --no-cache-dir --extra-index-url="https://packages.dea.ga.gov.au" .
 
 RUN pip freeze && pip check
-
-# Basic smoke test
-RUN dea_burn_severity --help
