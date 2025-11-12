@@ -34,7 +34,6 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME_BURN_SEVERITY }}
-          source-account: '538673716275'
           audience: sts.amazonaws.com
           aws-region: ap-southeast-2
 
