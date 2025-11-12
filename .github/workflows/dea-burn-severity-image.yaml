@@ -33,7 +33,9 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
-          role-to-assume: $AWS_ROLE_TO_ASSUME_BURN_SEVERITY
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME_BURN_SEVERITY }} # Use secrets context
+          source-account: '538673716275'  # Add source-account ID
+          audience: sts.amazonaws.com     # Add audience for OIDC
           aws-region: ap-southeast-2
 
       - name: Get tag for this build if it exists
