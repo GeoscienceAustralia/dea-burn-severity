@@ -33,7 +33,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
-          role-to-assume: arn:aws:iam::538673716275:role/burn_seveirty_github-actions-role
+          role-to-assume: $AWS_ROLE_TO_ASSUME_BURN_SEVERITY
           aws-region: ap-southeast-2
 
       - name: Get tag for this build if it exists
