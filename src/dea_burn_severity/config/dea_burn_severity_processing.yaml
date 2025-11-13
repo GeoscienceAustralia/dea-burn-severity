@@ -1,9 +1,7 @@
 polygons: s3://dea-public-data-dev/projects/burn_cube/derivative/dea_burn_severity/polygon_set/10k_sampled_fires.geojson
 output_dir: products
-max_fires: 10
 save_per_part_vectors: true
 save_per_part_rasters: true
-save_combined_per_fire: true
 force_rebuild: false
 upload_to_s3: true
 upload_to_s3_prefix: s3://dea-public-data-dev/projects/burn_cube/derivative/dea_burn_severity/result
@@ -68,3 +66,24 @@ grass_classes:
   - 95
   - 96
   - 97
+db_table: nli_lastboundaries_trigger
+db_columns:
+  - fire_id
+  - fire_name
+  - fire_type
+  - ignition_date
+  - capt_date
+  - capt_method
+  - area_ha
+  - perim_km
+  - state
+  - agency
+  - date_retrieved
+  - date_processed
+db_geom_column: geom
+db_host_env: DB_HOSTNAME
+db_name_env: DB_NAME
+db_password_env: DB_PASSWORD
+db_user: processing_user_ro
+db_port: 5432
+db_output_crs: EPSG:4283
