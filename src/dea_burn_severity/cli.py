@@ -35,8 +35,6 @@ from datacube.utils.geometry import CRS, Geometry
 from shapely.geometry import shape
 
 HARDCODED_DEFAULT_CONFIG: dict[str, Any] = {
-    "polygons": "s3://dea-public-data-dev/projects/burn_cube/derivative/dea_burn_severity/"
-    "polygon_set/10k_sampled_fires.geojson",
     "output_dir": "products",
     "save_per_part_vectors": True,
     "save_per_part_rasters": True,
@@ -235,7 +233,6 @@ _apply_config(DEFAULT_CONFIG)
 
 # Mapping of CLI options that can override configuration keys.
 CLI_CONFIG_KEYS = (
-    "polygons",
     "output_dir",
     "save_per_part_vectors",
     "save_per_part_rasters",
@@ -289,7 +286,6 @@ FIRE_ID_FIELDS: tuple[str, ...] = ("fire_id",)
 IGNITION_DATE_FIELDS: tuple[str, ...] = ("ignition_date", "ignition_d")
 EXTINGUISH_DATE_FIELDS: tuple[str, ...] = ("extinguish_date", "date_retrieved", "date_retri")
 
-POLYGON_SOURCE = "file"
 DB_SCHEMA = "public"
 DB_TABLE = ""
 DB_COLUMNS: list[str] = []
@@ -505,30 +501,16 @@ def _load_polygons_from_database() -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame(records, crs=DB_OUTPUT_CRS)
 
 
-def load_and_prepare_polygons(path: str | None) -> gpd.GeoDataFrame | None:
+def load_and_prepare_polygons() -> gpd.GeoDataFrame | None:
     """
-    Loads fire polygons from either a GeoJSON file/S3 object or a database table.
+    Loads fire polygons from the configured database and prepares them for processing.
     Dissolves by 'fire_id' if available to ensure one row per fire.
     """
-    if POLYGON_SOURCE == "database":
-        try:
-            poly_gdf = _load_polygons_from_database()
-        except Exception as exc:
-            print(f"Error: Failed loading polygons from database: {exc}")
-            return None
-    else:
-        if not path:
-            print("Error: No polygon path provided (and polygon_source='file').")
-            return None
-        print(f"Loading polygons from: {path}")
-        try:
-            poly_gdf = _read_geojson_maybe_s3(path)
-        except FileNotFoundError:
-            print(f"Error: Input polygon file not found at {path}")
-            return None
-        except Exception as exc:
-            print(f"Error: Failed reading polygons from {path}: {exc}")
-            return None
+    try:
+        poly_gdf = _load_polygons_from_database()
+    except Exception as exc:
+        print(f"Error: Failed loading polygons from database: {exc}")
+        return None
 
     try:
         if len(poly_gdf) > 1 and "fire_id" in poly_gdf.columns:
@@ -1019,7 +1001,6 @@ def _is_valid_geojson(path: str) -> bool:
 
 
 def main(
-    polygons_path: str | None,
     output_dir: str = OUTPUT_PRODUCT_DIR,
     save_per_part_vectors: bool = SAVE_PER_PART_GEOJSON,
     save_per_part_rasters: bool = SAVE_PER_PART_RASTERS,
@@ -1057,7 +1038,7 @@ def main(
 
     dc = datacube.Datacube(app=app_name)
 
-    all_polys = load_and_prepare_polygons(polygons_path)
+    all_polys = load_and_prepare_polygons()
     if all_polys is None or all_polys.empty:
         print("No polygons loaded. Exiting.")
         return
@@ -1172,19 +1153,6 @@ def _decorate_help(text: str, default_value: Any) -> str:
     help="Path or URL to a YAML configuration file overriding packaged defaults.",
 )
 @click.option(
-    "--polygons",
-    type=str,
-    default=None,
-    help="Path to input polygons GeoJSON. Local path or S3 URI (s3://...).",
-)
-@click.option(
-    "--polygon-source",
-    type=click.Choice(["file", "database"]),
-    default="file",
-    show_default=True,
-    help="Where to read polygons (file/database).",
-)
-@click.option(
     "--output-dir",
     type=str,
     default=None,
@@ -1245,7 +1213,6 @@ def cli(**kwargs: Any) -> None:
     Console script entry point.
     """
     config_path = kwargs.pop("config", None)
-    polygon_source = kwargs.pop("polygon_source", "file")
 
     user_config: dict[str, Any] | None = None
     if config_path:
@@ -1269,19 +1236,7 @@ def cli(**kwargs: Any) -> None:
 
     _apply_config(effective_config)
 
-    normalized_source = str(polygon_source).lower()
-    if normalized_source not in {"file", "database"}:
-        raise SystemExit("--polygon-source must be either 'file' or 'database'.")
-    if normalized_source == "file" and not effective_config.get("polygons"):
-        raise SystemExit(
-            "The --polygons path must be provided when --polygon-source=file."
-        )
-
-    global POLYGON_SOURCE
-    POLYGON_SOURCE = normalized_source
-
     main(
-        polygons_path=effective_config["polygons"],
         output_dir=effective_config["output_dir"],
         save_per_part_vectors=bool(effective_config["save_per_part_vectors"]),
         save_per_part_rasters=bool(effective_config["save_per_part_rasters"]),

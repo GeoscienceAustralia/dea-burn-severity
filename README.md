@@ -26,7 +26,7 @@ Run `dea-burn-severity --help` to inspect all options.
 ## Processing Overview
 
 - 🔄 **Config merge**: Baked-in defaults (mirroring the former packaged YAML) are merged with any external YAML and CLI flags, wiring options like `output_dir`, `resolution`, acquisition windows, and S3 upload behaviour.
-- 🗺️ **Polygon prep**: Fire footprints (`polygons`) are loaded from local paths/`s3://` URIs or pulled straight from a Postgres table (pass `--polygon-source database`), dissolved to one row per `fire_id` if available, and assumed to be single polygons (no explode/merge stage required).
+- 🗺️ **Polygon prep**: Fire footprints are read directly from the configured Postgres table, dissolved to one row per `fire_id` if available, and assumed to be single polygons (no explode/merge stage required).
 - 🛰️ **Baseline vs post-fire stacks**: For each fire polygon the CLI instantiates a `datacube.Datacube`, first attempts a pristine (99% clear) Sentinel-2 baseline, then falls back to a dilated-cloud composite that picks the latest valid pixel if necessary; post-fire loads retain the looser `min_gooddata` behaviour.
 - 🌿 **Landcover-aware severity**: Landcover tiles (`ga_ls_landcover_class_cyear_3`) provide grass vs woody masks. The workflow computes delta NBR (`calculate_indices`) and applies class-specific thresholds to yield categorical severity rasters.
 - 🧪 **Quality masks & stats**: A composite debug mask flags water, cloud, and contiguity issues across the time series; per-fire logs capture pixel counts, valid baselines, and missing data to support QA.
@@ -36,15 +36,15 @@ Run `dea-burn-severity --help` to inspect all options.
 
 ## Configuration
 
-The CLI ships with sensible defaults compiled directly into the source. Provide a custom YAML file—local path, `http(s)://`
+- **Defaults & overrides**: The CLI ships with sensible defaults compiled directly into the source. Provide a custom YAML file—local path, `http(s)://`
 URL, or `s3://` URI—via `--config` to override any value. CLI flags continue to override
 both the built-in and external configuration values. The YAML holds every CLI option
-(e.g. `polygons`, `output_dir`, S3 settings), so supplying an external config alone is often
+(e.g. `output_dir`, S3 settings), so supplying an external config alone is often
 enough to run the pipeline. Boolean CLI overrides accept `true`/`false`.
 
 ### Database polygon loading
 
-Pass `--polygon-source database` to read footprints from Postgres instead of the filesystem. The schema is fixed to `public`; configure the table/column metadata via `db_table`, `db_columns`, `db_geom_column`, and ensure the environment supplies credentials via the names in `db_host_env`, `db_name_env`, and `db_password_env` (defaults match the snippet provided: `DB_HOSTNAME`, `DB_NAME`, `DB_PASSWORD`). The reader uses `psycopg2-binary`, so install it alongside the CLI when enabling this path.
+Fire footprints always come from Postgres. Configure the table/column metadata via `db_table`, `db_columns`, `db_geom_column`, and ensure the environment supplies credentials via the names in `db_host_env`, `db_name_env`, and `db_password_env` (defaults already point at the `fire_severity_product` instance). The reader uses `psycopg2-binary`, so install it alongside the CLI.
 
 Example YAML overrides (matching the sample row you shared):
 
