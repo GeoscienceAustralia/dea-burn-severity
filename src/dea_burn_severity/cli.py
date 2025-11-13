@@ -10,14 +10,15 @@ from __future__ import annotations
 
 # Standard library imports
 import copy
+import json
 import os
+import re
 import shutil
 import tempfile
 import traceback
 from datetime import datetime, timedelta
-from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
@@ -31,6 +32,99 @@ import xarray as xr
 import yaml
 from datacube.utils.cog import write_cog
 from datacube.utils.geometry import CRS, Geometry
+from shapely.geometry import shape
+
+HARDCODED_DEFAULT_CONFIG: dict[str, Any] = {
+    "polygons": "s3://dea-public-data-dev/projects/burn_cube/derivative/dea_burn_severity/"
+    "polygon_set/10k_sampled_fires.geojson",
+    "output_dir": "products",
+    "save_per_part_vectors": True,
+    "save_per_part_rasters": True,
+    "force_rebuild": False,
+    "upload_to_s3": True,
+    "upload_to_s3_prefix": "s3://dea-public-data-dev/projects/burn_cube/derivative/"
+    "dea_burn_severity/result",
+    "app_name": "Burnt_Area_Mapping",
+    "output_crs": "EPSG:3577",
+    "resolution": [-10, 10],
+    "s2_products": ["ga_s2am_ard_3", "ga_s2bm_ard_3", "ga_s2cm_ard_3"],
+    "s2_measurements": [
+        "nbart_blue",
+        "nbart_green",
+        "nbart_red",
+        "nbart_nir_1",
+        "nbart_nir_2",
+        "nbart_swir_2",
+        "nbart_swir_3",
+        "oa_nbart_contiguity",
+        "oa_s2cloudless_mask",
+    ],
+    "pre_fire_buffer_days": 50,
+    "post_fire_start_days": 15,
+    "post_fire_window_days": 60,
+    "grass_classes": [
+        3,
+        14,
+        15,
+        16,
+        17,
+        18,
+        21,
+        32,
+        33,
+        34,
+        35,
+        36,
+        39,
+        50,
+        51,
+        52,
+        53,
+        54,
+        57,
+        78,
+        79,
+        80,
+        81,
+        82,
+        83,
+        84,
+        85,
+        86,
+        87,
+        88,
+        89,
+        90,
+        91,
+        92,
+        94,
+        95,
+        96,
+        97,
+    ],
+    "db_table": "nli_lastboundaries_trigger",
+    "db_columns": [
+        "fire_id",
+        "fire_name",
+        "fire_type",
+        "ignition_date",
+        "capt_date",
+        "capt_method",
+        "area_ha",
+        "perim_km",
+        "state",
+        "agency",
+        "date_retrieved",
+        "date_processed",
+    ],
+    "db_geom_column": "geom",
+    "db_host_env": "DB_HOST_NAME_PLACEHOLDER",
+    "db_name_env": "DB_NAME_PLACEHOLDER",
+    "db_password_env": "PASSWORD_PLACEHOLDER",
+    "db_user": "processing_user_ro",
+    "db_port": 5432,
+    "db_output_crs": "EPSG:4283",
+}
 
 # Local/custom tool imports (available on the environment PYTHONPATH)
 from dea_tools.bandindices import calculate_indices
@@ -44,16 +138,9 @@ from dea_tools.spatial import xr_vectorize
 
 def _load_default_config() -> dict[str, Any]:
     """
-    Load the packaged default YAML configuration.
+    Return a deep copy of the baked-in default configuration.
     """
-    config_resource = resources.files("dea_burn_severity").joinpath(
-        "config/dea_burn_severity_processing.yaml"
-    )
-    with config_resource.open("r", encoding="utf-8") as stream:
-        data = yaml.safe_load(stream)
-    if not isinstance(data, dict):
-        raise RuntimeError("Default configuration must be a mapping.")
-    return data
+    return copy.deepcopy(HARDCODED_DEFAULT_CONFIG)
 
 
 def _load_yaml_config(source: str | Path) -> dict[str, Any]:
@@ -101,22 +188,19 @@ def _apply_config(settings: dict[str, Any]) -> None:
     """
     Update module-level configuration variables from the provided settings.
     """
-    if not settings.get("polygons"):
-        raise ValueError("Configuration must include a non-empty 'polygons' value.")
-
-    global OUTPUT_PRODUCT_DIR, MAX_POLYGONS_TO_PROCESS
+    global OUTPUT_PRODUCT_DIR
     global SAVE_PER_PART_GEOJSON, SAVE_PER_PART_RASTERS
-    global SAVE_COMBINED_PER_FIRE_GEOJSON, FORCE_REBUILD
+    global FORCE_REBUILD
     global DEFAULT_S3_UPLOAD_PREFIX, UPLOAD_TO_S3
     global OUTPUT_CRS, RESOLUTION, S2_PRODUCTS, S2_MEASUREMENTS
     global PRE_FIRE_BUFFER_DAYS, POST_FIRE_START_DAYS, POST_FIRE_WINDOW_DAYS
     global GRASS_CLASSES
+    global POLYGON_SOURCE, DB_TABLE, DB_COLUMNS, DB_GEOM_COLUMN
+    global DB_HOST_ENV, DB_NAME_ENV, DB_PASSWORD_ENV, DB_USER, DB_PORT, DB_OUTPUT_CRS
 
     OUTPUT_PRODUCT_DIR = settings["output_dir"]
-    MAX_POLYGONS_TO_PROCESS = int(settings["max_fires"])
     SAVE_PER_PART_GEOJSON = bool(settings["save_per_part_vectors"])
     SAVE_PER_PART_RASTERS = bool(settings["save_per_part_rasters"])
-    SAVE_COMBINED_PER_FIRE_GEOJSON = bool(settings["save_combined_per_fire"])
     FORCE_REBUILD = bool(settings.get("force_rebuild", False))
 
     DEFAULT_S3_UPLOAD_PREFIX = settings["upload_to_s3_prefix"]
@@ -135,6 +219,15 @@ def _apply_config(settings: dict[str, Any]) -> None:
     POST_FIRE_WINDOW_DAYS = int(settings["post_fire_window_days"])
 
     GRASS_CLASSES = list(settings["grass_classes"])
+    DB_TABLE = settings.get("db_table", "nli_lastboundaries_trigger")
+    DB_COLUMNS = list(settings.get("db_columns", []))
+    DB_GEOM_COLUMN = settings.get("db_geom_column", "geom")
+    DB_HOST_ENV = settings.get("db_host_env", "DB_HOST_NAME_PLACEHOLDER")
+    DB_NAME_ENV = settings.get("db_name_env", "DB_NAME_PLACEHOLDER")
+    DB_PASSWORD_ENV = settings.get("db_password_env", "PASSWORD_PLACEHOLDER")
+    DB_USER = settings.get("db_user", "processing_user_ro")
+    DB_PORT = int(settings.get("db_port", 5432))
+    DB_OUTPUT_CRS = settings.get("db_output_crs", "EPSG:4283")
 
 
 DEFAULT_CONFIG = _load_default_config()
@@ -144,20 +237,159 @@ _apply_config(DEFAULT_CONFIG)
 CLI_CONFIG_KEYS = (
     "polygons",
     "output_dir",
-    "max_fires",
     "save_per_part_vectors",
     "save_per_part_rasters",
-    "save_combined_per_fire",
     "force_rebuild",
     "upload_to_s3_prefix",
     "upload_to_s3",
     "app_name",
+    "db_table",
 )
+
+LOAD_DASK_CHUNKS: dict[str, int] = {"x": 2048, "y": 2048}
+
+ATTRIBUTE_COPY_RULES: tuple[dict[str, Any], ...] = (
+    {"target": "fire_id", "sources": ("fire_id",), "date": False},
+    {"target": "fire_name", "sources": ("fire_name",), "date": False},
+    {"target": "fire_type", "sources": ("fire_type",), "date": False},
+    {
+        "target": "ignition_date",
+        "sources": ("ignition_date", "ignition_d"),
+        "date": True,
+    },
+    {
+        "target": "capt_date",
+        "sources": ("capt_date", "capture_date", "capture_da"),
+        "date": True,
+    },
+    {"target": "capt_method", "sources": ("capt_method", "capt_metho"), "date": False},
+    {"target": "area_ha", "sources": ("area_ha",), "date": False},
+    {"target": "perim_km", "sources": ("perim_km",), "date": False},
+    {"target": "state", "sources": ("state",), "date": False},
+    {"target": "agency", "sources": ("agency",), "date": False},
+    {
+        "target": "date_retrieved",
+        "sources": ("date_retrieved", "date_retri"),
+        "date": True,
+    },
+    {
+        "target": "date_processed",
+        "sources": ("date_processed", "date_proce"),
+        "date": True,
+    },
+    {
+        "target": "extinguish_date",
+        "sources": ("extinguish_date",),
+        "date": True,
+    },
+)
+
+FIRE_NAME_FIELDS: tuple[str, ...] = ("fire_name",)
+FIRE_ID_FIELDS: tuple[str, ...] = ("fire_id",)
+IGNITION_DATE_FIELDS: tuple[str, ...] = ("ignition_date", "ignition_d")
+EXTINGUISH_DATE_FIELDS: tuple[str, ...] = ("extinguish_date", "date_retrieved", "date_retri")
+
+POLYGON_SOURCE = "file"
+DB_SCHEMA = "public"
+DB_TABLE = ""
+DB_COLUMNS: list[str] = []
+DB_GEOM_COLUMN = "geom"
+DB_USER = "processing_user_ro"
+DB_PORT = 5432
+DB_OUTPUT_CRS = "EPSG:4283"
 
 
 # =============================
 # ======= CORE HELPERS ========
 # =============================
+
+
+def _first_valid_value(series: pd.Series, keys: Iterable[str]) -> Any | None:
+    for key in keys:
+        if key not in series:
+            continue
+        value = series[key]
+        if pd.isna(value):
+            continue
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped or stripped.lower() in {"none", "nan", "null"}:
+                continue
+            value = stripped
+        return value
+    return None
+
+
+def _is_valid_date_string(value: str) -> bool:
+    return bool(re.match(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$", value))
+
+
+def process_date(value: Any) -> str | None:
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return None
+    if isinstance(value, (datetime, pd.Timestamp)):
+        return pd.to_datetime(value).strftime("%Y-%m-%d")
+    if isinstance(value, np.datetime64):
+        return pd.to_datetime(value).strftime("%Y-%m-%d")
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "nan", "null"}:
+        return None
+    if _is_valid_date_string(text):
+        return text
+    digits = re.sub(r"[^0-9]", "", text)
+    if len(digits) >= 8:
+        return f"{digits[0:4]}-{digits[4:6]}-{digits[6:8]}"
+    return None
+
+
+def clean_fire_slug(name: str | None) -> str:
+    if not name:
+        return ""
+    cleaned = re.sub(r"[^A-Za-z0-9\s]", "", str(name))
+    cleaned = re.sub(r"\s+", "_", cleaned).strip("_")
+    return cleaned
+
+
+def _select_reference_band(dataset: xr.Dataset) -> str:
+    preferred = ("nbart_green", "nbart_red", "nbart_nir_1", "nbart_blue")
+    for candidate in preferred:
+        if candidate in dataset.data_vars:
+            return candidate
+    for name, data in dataset.data_vars.items():
+        if "time" in data.dims:
+            return name
+    raise ValueError("Dataset lacks a data variable with a 'time' dimension.")
+
+
+def find_latest_valid_pixel(dataset: xr.Dataset) -> xr.Dataset:
+    if "time" not in dataset.dims:
+        raise ValueError("Dataset must include a 'time' dimension.")
+    ref_band = _select_reference_band(dataset)
+    time_numeric = xr.DataArray(
+        dataset["time"].astype("datetime64[ns]").astype(np.int64), dims="time"
+    )
+    valid_mask = dataset[ref_band].notnull()
+    valid_times = valid_mask * time_numeric
+    latest_time = valid_times.max(dim="time")
+    latest_mask = valid_times == latest_time
+    latest_values = dataset.where(latest_mask).max(dim="time")
+    return latest_values
+
+
+def _extract_attribute_values(series: pd.Series) -> dict[str, Any]:
+    attributes: dict[str, Any] = {}
+    for rule in ATTRIBUTE_COPY_RULES:
+        raw_value = _first_valid_value(series, rule["sources"])
+        if raw_value is None:
+            continue
+        if rule["date"]:
+            formatted = process_date(raw_value)
+            if formatted is None:
+                continue
+            attributes[rule["target"]] = formatted
+        else:
+            attributes[rule["target"]] = raw_value
+    return attributes
 
 def _read_geojson_maybe_s3(path: str) -> gpd.GeoDataFrame:
     """
@@ -197,20 +429,106 @@ def _read_geojson_maybe_s3(path: str) -> gpd.GeoDataFrame:
     return gpd.read_file(path)
 
 
-def load_and_prepare_polygons(path: str) -> gpd.GeoDataFrame | None:
+def _load_polygons_from_database() -> gpd.GeoDataFrame:
     """
-    Loads the fire polygon GeoJSON and prepares it for processing.
+    Load polygons directly from the configured PostgreSQL/PostGIS table.
+    """
+    if not DB_TABLE:
+        raise ValueError("Configuration 'db_table' must be provided for database polygon loading.")
+    if not DB_COLUMNS:
+        raise ValueError("Configuration 'db_columns' must include at least one attribute column.")
+
+    try:
+        import psycopg2  # type: ignore
+        from psycopg2 import sql  # type: ignore
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "Database polygon loading requires the 'psycopg2-binary' package. "
+            "Install with: pip install psycopg2-binary"
+        ) from exc
+
+    conn = psycopg2.connect(
+        host=DB_HOST_ENV,
+        dbname=DB_NAME_ENV,
+        port=str(DB_PORT),
+        user=DB_USER,
+        password=DB_PASSWORD_ENV,
+    )
+
+    table_identifier = (
+        sql.Identifier(DB_SCHEMA, DB_TABLE) if DB_SCHEMA else sql.Identifier(DB_TABLE)
+    )
+    select_clause = sql.SQL(", ").join(sql.Identifier(col) for col in DB_COLUMNS)
+    query = sql.SQL(
+        "SELECT {fields}, ST_AsGeoJSON({geom}) AS geom_geojson FROM {table}"
+    ).format(
+        fields=select_clause,
+        geom=sql.Identifier(DB_GEOM_COLUMN),
+        table=table_identifier,
+    )
+
+    print(
+        f"Querying polygons from table '{DB_SCHEMA + '.' if DB_SCHEMA else ''}{DB_TABLE}'..."
+    )
+    records: list[dict[str, Any]] = []
+    failures = 0
+
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(query)
+            rows = cur.fetchall()
+            print(f"Retrieved {len(rows)} rows from database.")
+            for idx, row in enumerate(rows):
+                attr_values = row[:-1]
+                geom_raw = row[-1]
+                try:
+                    json_start = geom_raw.find("{")
+                    geom_str = geom_raw[json_start:] if json_start >= 0 else geom_raw
+                    geom_mapping = json.loads(geom_str)
+                    geom_obj = shape(geom_mapping)
+                except Exception as exc:
+                    failures += 1
+                    print(f"Warning: Failed to parse geometry for row {idx}: {exc}")
+                    continue
+
+                record = {col: val for col, val in zip(DB_COLUMNS, attr_values)}
+                record["geometry"] = geom_obj
+                records.append(record)
+    finally:
+        conn.close()
+
+    if failures:
+        print(f"Skipped {failures} rows due to geometry parsing errors.")
+    if not records:
+        return gpd.GeoDataFrame(columns=[*DB_COLUMNS, "geometry"], crs=DB_OUTPUT_CRS)
+
+    return gpd.GeoDataFrame(records, crs=DB_OUTPUT_CRS)
+
+
+def load_and_prepare_polygons(path: str | None) -> gpd.GeoDataFrame | None:
+    """
+    Loads fire polygons from either a GeoJSON file/S3 object or a database table.
     Dissolves by 'fire_id' if available to ensure one row per fire.
     """
-    print(f"Loading polygons from: {path}")
-    try:
-        poly_gdf = _read_geojson_maybe_s3(path)
-    except FileNotFoundError:
-        print(f"Error: Input polygon file not found at {path}")
-        return None
-    except Exception as exc:
-        print(f"Error: Failed reading polygons from {path}: {exc}")
-        return None
+    if POLYGON_SOURCE == "database":
+        try:
+            poly_gdf = _load_polygons_from_database()
+        except Exception as exc:
+            print(f"Error: Failed loading polygons from database: {exc}")
+            return None
+    else:
+        if not path:
+            print("Error: No polygon path provided (and polygon_source='file').")
+            return None
+        print(f"Loading polygons from: {path}")
+        try:
+            poly_gdf = _read_geojson_maybe_s3(path)
+        except FileNotFoundError:
+            print(f"Error: Input polygon file not found at {path}")
+            return None
+        except Exception as exc:
+            print(f"Error: Failed reading polygons from {path}: {exc}")
+            return None
 
     try:
         if len(poly_gdf) > 1 and "fire_id" in poly_gdf.columns:
@@ -247,7 +565,7 @@ def load_ard_with_fallback(
         "resolution": RESOLUTION,
         "group_by": "solar_day",
         "cloud_mask": "s2cloudless",
-        "dask_chunks": {},
+        "dask_chunks": LOAD_DASK_CHUNKS,
         **kwargs,
     }
 
@@ -265,6 +583,44 @@ def load_ard_with_fallback(
         f"even with min_gooddata={list(min_gooddata_thresholds)[-1]}"
     )
     return data
+
+
+def load_baseline_stack(
+    dc: datacube.Datacube, gpgon: Geometry, time: tuple[str, str]
+) -> tuple[xr.Dataset, xr.Dataset | None]:
+    """
+    Load baseline ARD with strict cloud limits, then fall back to a relaxed
+    load that is composited to the latest valid pixel if required.
+    """
+    base_params = {
+        "dc": dc,
+        "products": S2_PRODUCTS,
+        "geopolygon": gpgon,
+        "time": time,
+        "measurements": S2_MEASUREMENTS,
+        "output_crs": OUTPUT_CRS,
+        "resolution": RESOLUTION,
+        "group_by": "solar_day",
+        "cloud_mask": "s2cloudless",
+        "dask_chunks": LOAD_DASK_CHUNKS,
+        "min_gooddata": 0.99,
+    }
+
+    baseline = load_ard(**base_params)
+    if baseline.time.size > 0:
+        return baseline, baseline.isel(time=-1)
+
+    print("Baseline load empty; retrying with mask dilation and relaxed clouds.")
+    relaxed_params = base_params | {
+        "mask_filters": [("dilation", 15)],
+        "min_gooddata": 0.20,
+    }
+    baseline = load_ard(**relaxed_params)
+    if baseline.time.size == 0:
+        return baseline, None
+
+    composite = find_latest_valid_pixel(baseline)
+    return baseline, composite
 
 
 def calculate_severity(
@@ -420,7 +776,7 @@ def process_single_fire(
     out_dir: str | None = None,
 ) -> gpd.GeoDataFrame | None:
     """
-    Full burn mapping workflow for a single polygon (part).
+    Full burn mapping workflow for a single fire polygon.
     Returns:
         GeoDataFrame dissolved by 'severity' (with 'severity' column),
         reprojected to 'EPSG:4283', or None if nothing to save.
@@ -433,22 +789,24 @@ def process_single_fire(
     poly = gpd.GeoDataFrame([fire_series], crs=poly_crs).copy()
     poly = poly.to_crs("EPSG:4283")
 
-    fire_id = fire_series.get("fire_id", None)
-    fire_name_part = unique_fire_name
+    attributes = _extract_attribute_values(fire_series)
 
-    try:
-        fire_date = str(fire_series.ignition_date)[:10]
-    except AttributeError as exc:
-        print("Error: Could not find 'ignition_date' column in input polygons.")
-        raise exc
+    fire_id = attributes.get("fire_id")
+    fire_name_value = attributes.get("fire_name")
+    fire_slug = unique_fire_name
+    fire_display_name = str(fire_name_value).strip() if fire_name_value else fire_slug
 
-    try:
-        if pd.isna(fire_series.extinguish_date):
-            extinguish_date = "None"
-        else:
-            extinguish_date = str(fire_series.extinguish_date)[:10]
-    except (AttributeError, KeyError):
-        extinguish_date = "None"
+    fire_date = attributes.get("ignition_date")
+    if not fire_date:
+        fallback_raw = _first_valid_value(fire_series, ("capt_date", "capture_date", "capture_da"))
+        fire_date = process_date(fallback_raw)
+    if not fire_date:
+        raise ValueError(
+            f"Could not determine ignition date for fire '{fire_display_name}'."
+        )
+
+    extinguish_date_value = attributes.get("date_retrieved") or attributes.get("extinguish_date")
+    extinguish_date = extinguish_date_value if extinguish_date_value else "None"
 
     start_date_pre = (
         datetime.strptime(fire_date, "%Y-%m-%d") - timedelta(days=PRE_FIRE_BUFFER_DAYS)
@@ -468,22 +826,20 @@ def process_single_fire(
         datetime.strptime(start_date_post, "%Y-%m-%d") + timedelta(days=POST_FIRE_WINDOW_DAYS)
     ).strftime("%Y-%m-%d")
 
-    month_number = int(fire_date[5:7])
-    landcover_year = fire_date[0:4] if month_number >= 10 else str(int(fire_date[0:4]) - 1)
+    landcover_year = str(int(fire_date[0:4]) - 1)
 
-    baseline = load_ard_with_fallback(
-        dc, gpgon, time=(start_date_pre, end_date_pre), min_gooddata_thresholds=(0.99, 0.90)
+    baseline, closest_bl = load_baseline_stack(
+        dc, gpgon, time=(start_date_pre, end_date_pre)
     )
-    if baseline.time.size == 0:
+    if closest_bl is None:
         if log_path:
             _append_log(
                 log_path,
-                f"{fire_name_part}\tbaseline_scenes=0\tpost_scenes=0\tgrid=0x0"
+                f"{fire_display_name}\tbaseline_scenes=0\tpost_scenes=0\tgrid=0x0"
                 "\ttotal_px=0\tvalid_px=0\tburn_px=0\tmasked_px=0",
             )
-        print("No baseline data for this part. Skipping.")
+        print("No baseline data for this fire. Skipping.")
         return None
-    closest_bl = baseline.isel(time=-1)
 
     post = load_ard_with_fallback(
         dc, gpgon, time=(start_date_post, end_date_post), min_gooddata_thresholds=(0.90,)
@@ -500,11 +856,11 @@ def process_single_fire(
             )
             _append_log(
                 log_path,
-                f"{fire_name_part}\tbaseline_scenes={baseline.time.size}\tpost_scenes=0"
+                f"{fire_display_name}\tbaseline_scenes={baseline.time.size}\tpost_scenes=0"
                 f"\tgrid={yy}x{xx}\ttotal_px={total_px}\tvalid_px_baseline={bl_valid_px}"
                 "\tburn_px=0\tmasked_px=0",
             )
-        print("No post-fire data for this part. Skipping.")
+        print("No post-fire data for this fire. Skipping.")
         return None
 
     landcover = dc.load(
@@ -523,7 +879,7 @@ def process_single_fire(
             total_px = yy * xx
             _append_log(
                 log_path,
-                f"{fire_name_part}\tbaseline_scenes={baseline.time.size}"
+                f"{fire_display_name}\tbaseline_scenes={baseline.time.size}"
                 f"\tpost_scenes={post.time.size}\tgrid={yy}x{xx}"
                 f"\ttotal_px={total_px}\tvalid_px=0\tburn_px=0\tmasked_px=0"
                 "\tlandcover=missing",
@@ -585,7 +941,7 @@ def process_single_fire(
         _append_log(
             log_path,
             (
-                f"{fire_name_part}"
+                f"{fire_display_name}"
                 f"\tbaseline_scenes={baseline.time.size}"
                 f"\tpost_scenes={post.time.size}"
                 f"\tgrid={yy}x{xx}"
@@ -598,12 +954,12 @@ def process_single_fire(
             ),
         )
 
-    print("Vectorizing severity raster (per-part)...")
+    print("Vectorizing severity raster...")
     severity_vectors = xr_vectorize(
         final_severity, attribute_col="severity", crs=OUTPUT_CRS, mask=final_severity != 0
     )
     if severity_vectors.empty:
-        print("No burn area detected for this part.")
+        print("No burn area detected for this fire.")
         return None
 
     severity_vectors = severity_vectors.to_crs("EPSG:4283")
@@ -611,35 +967,41 @@ def process_single_fire(
 
     aggregated = clipped.dissolve(by="severity").reset_index()
 
-    aggregated["fire_id"] = fire_id
-    aggregated["fire_name"] = fire_series.get("fire_name", fire_name_part)
+    if fire_id is not None:
+        aggregated["fire_id"] = fire_id
+    aggregated["fire_name"] = fire_name_value or fire_slug
     aggregated["ignition_date"] = fire_date
     aggregated["extinguish_date"] = extinguish_date
+
+    for key, value in attributes.items():
+        if key in {"fire_id", "fire_name", "ignition_date", "extinguish_date"}:
+            continue
+        aggregated[key] = value
 
     base_dir = out_dir if out_dir else OUTPUT_PRODUCT_DIR
     os.makedirs(base_dir, exist_ok=True)
 
     if save_per_part_vectors:
         out_vec = os.path.join(
-            base_dir, f"burn_severity_polygons_{fire_name_part}.geojson"
+            base_dir, f"burn_severity_polygons_{fire_slug}.geojson"
         )
         aggregated.to_file(out_vec, driver="GeoJSON")
-        print(f"Saved per-part severity GeoJSON: {out_vec}")
+        print(f"Saved per-fire severity GeoJSON: {out_vec}")
 
     if save_per_part_rasters:
         out_cog_preview = os.path.join(
-            base_dir, f"s2_postfire_preview_{fire_name_part}.tif"
+            base_dir, f"s2_postfire_preview_{fire_slug}.tif"
         )
         write_cog(
             post.isel(time=0).to_array().compute(), fname=out_cog_preview, overwrite=True
         )
         print(f"Saved post-fire preview COG: {out_cog_preview}")
 
-        out_cog_debug = os.path.join(base_dir, f"debug_mask_raster_{fire_name_part}.tif")
+        out_cog_debug = os.path.join(base_dir, f"debug_mask_raster_{fire_slug}.tif")
         write_cog(debug_mask.compute(), fname=out_cog_debug, overwrite=True)
         print(f"Saved debug mask COG: {out_cog_debug}")
 
-    print(f"Successfully processed part: {fire_name_part}")
+    print(f"Successfully processed fire: {fire_display_name}")
     return aggregated
 
 
@@ -657,12 +1019,10 @@ def _is_valid_geojson(path: str) -> bool:
 
 
 def main(
-    polygons_path: str,
+    polygons_path: str | None,
     output_dir: str = OUTPUT_PRODUCT_DIR,
-    max_fires: int = MAX_POLYGONS_TO_PROCESS,
     save_per_part_vectors: bool = SAVE_PER_PART_GEOJSON,
     save_per_part_rasters: bool = SAVE_PER_PART_RASTERS,
-    save_combined: bool = SAVE_COMBINED_PER_FIRE_GEOJSON,
     force_rebuild: bool = FORCE_REBUILD,
     upload_to_s3: bool = UPLOAD_TO_S3,
     s3_upload_prefix: str = DEFAULT_S3_UPLOAD_PREFIX,
@@ -671,15 +1031,13 @@ def main(
     """
     Entry point for processing burn severity polygons.
     """
-    global OUTPUT_PRODUCT_DIR, MAX_POLYGONS_TO_PROCESS
+    global OUTPUT_PRODUCT_DIR
     global SAVE_PER_PART_GEOJSON, SAVE_PER_PART_RASTERS
-    global SAVE_COMBINED_PER_FIRE_GEOJSON, FORCE_REBUILD
+    global FORCE_REBUILD
 
     OUTPUT_PRODUCT_DIR = output_dir
-    MAX_POLYGONS_TO_PROCESS = max_fires
     SAVE_PER_PART_GEOJSON = save_per_part_vectors
     SAVE_PER_PART_RASTERS = save_per_part_rasters
-    SAVE_COMBINED_PER_FIRE_GEOJSON = save_combined
     FORCE_REBUILD = force_rebuild
 
     os.makedirs(OUTPUT_PRODUCT_DIR, exist_ok=True)
@@ -704,71 +1062,52 @@ def main(
         print("No polygons loaded. Exiting.")
         return
 
-    num_fires_to_process = min(MAX_POLYGONS_TO_PROCESS, len(all_polys))
-    print(f"Found {len(all_polys)} total features. Processing first {num_fires_to_process}.")
-    polys_to_process = all_polys.iloc[:num_fires_to_process]
+    print(f"Found {len(all_polys)} total features. Processing all of them.")
+    polys_to_process = all_polys
 
-    try:
-        all_polys_exploded = polys_to_process.explode(index_parts=True)
-    except TypeError:
-        print("GeoPandas without index_parts: building a MultiIndex fallback...")
-        tmp = polys_to_process.explode()
-        tmp["__part_id__"] = tmp.groupby(tmp.index).cumcount()
-        all_polys_exploded = tmp.set_index([tmp.index, "__part_id__"])
-        all_polys_exploded.index.names = [None, None]
+    fire_success = fire_fail = fire_skip = 0
 
-    print(f"Exploded into {len(all_polys_exploded)} polygon parts.")
-
-    if isinstance(all_polys_exploded.index, pd.MultiIndex):
-        group_iter = all_polys_exploded.groupby(level=0, sort=False)
-    else:
-        group_iter = [(idx, all_polys_exploded.loc[[idx]]) for idx in all_polys_exploded.index]
-
-    part_success = part_fail = 0
-    combined_success = combined_skip = 0
-
-    print("\nBeginning grouped processing (combine parts per original feature)...")
-    for orig_idx, parts_df in group_iter:
-        orig_row = polys_to_process.loc[orig_idx]
-
-        if "fire_name" in orig_row and pd.notna(orig_row["fire_name"]):
-            base_fire_name = str(orig_row["fire_name"]).strip()
-        elif "fire_id" in orig_row:
-            base_fire_name = f"fire_id_{orig_row['fire_id']}"
+    print("\nBeginning per-fire processing (single polygon per feature)...")
+    for idx, fire_series in polys_to_process.iterrows():
+        fire_attrs = _extract_attribute_values(fire_series)
+        if fire_attrs.get("fire_name"):
+            base_fire_name = str(fire_attrs["fire_name"]).strip()
+        elif fire_attrs.get("fire_id") is not None:
+            base_fire_name = f"fire_id_{fire_attrs['fire_id']}"
         else:
-            base_fire_name = f"fire_{orig_idx}"
+            base_fire_name = f"fire_{idx}"
 
-        base_fire_slug = "_".join(base_fire_name.split())
+        base_fire_slug = clean_fire_slug(base_fire_name)
+        if not base_fire_slug:
+            base_fire_slug = f"fire_{idx}"
         base_fire_slug = base_fire_slug.replace(os.sep, "_")
         if os.altsep:
             base_fire_slug = base_fire_slug.replace(os.altsep, "_")
 
-        group_dir = os.path.join(OUTPUT_PRODUCT_DIR, base_fire_slug)
-        os.makedirs(group_dir, exist_ok=True)
+        fire_dir = os.path.join(OUTPUT_PRODUCT_DIR, base_fire_slug)
+        os.makedirs(fire_dir, exist_ok=True)
 
-        combined_path = os.path.join(
-            group_dir, f"burn_severity_polygons_{base_fire_slug}.geojson"
+        final_vector_path = os.path.join(
+            fire_dir, f"burn_severity_polygons_{base_fire_slug}.geojson"
         )
+        log_path = os.path.join(fire_dir, f"{base_fire_slug}_processing.log")
 
-        log_path = os.path.join(group_dir, f"{base_fire_slug}_processing.log")
         if not os.path.exists(log_path):
             _append_log(
                 log_path,
-                f"# Processing log for {base_fire_name} (group index {orig_idx})",
+                f"# Processing log for {base_fire_name} (feature index {idx})",
             )
             _append_log(
                 log_path,
-                "# part_name\tbaseline_scenes\tpost_scenes\tgrid\ttotal_px\tvalid_px"
+                "# fire_name\tbaseline_scenes\tpost_scenes\tgrid\ttotal_px\tvalid_px"
                 "\tburn_px\tmasked_px\tvalid_px_baseline\tvalid_px_post_any",
             )
 
         skip_due_to_output = False
-        if (not FORCE_REBUILD) and SAVE_COMBINED_PER_FIRE_GEOJSON:
-            if _is_valid_geojson(combined_path):
-                print(
-                    f"[Group '{base_fire_name}'] Local combined exists & valid. Skipping processing."
-                )
-                combined_skip += 1
+        if not FORCE_REBUILD:
+            if _is_valid_geojson(final_vector_path):
+                print(f"[Fire '{base_fire_name}'] Local output exists & valid. Skipping.")
+                fire_skip += 1
                 skip_due_to_output = True
             elif upload_to_s3 and s3_fs is not None:
                 bucket, prefix = _parse_s3_uri(s3_upload_prefix)
@@ -777,92 +1116,48 @@ def main(
                     f"burn_severity_polygons_{base_fire_slug}.geojson"
                 )
                 if _s3_key_exists_and_nonempty(s3_fs, bucket, remote_key):
-                    print(
-                        f"[Group '{base_fire_name}'] Combined exists in S3. Skipping processing."
-                    )
-                    combined_skip += 1
+                    print(f"[Fire '{base_fire_name}'] Output exists in S3. Skipping.")
+                    fire_skip += 1
                     skip_due_to_output = True
 
         if skip_due_to_output:
             continue
 
         print("\n" + "=" * 80)
-        print(f"Processing original feature group: '{base_fire_name}'")
+        print(f"Processing fire polygon: '{base_fire_name}'")
         print("=" * 80)
 
-        per_part_gdfs: list[gpd.GeoDataFrame] = []
-
-        for (_, part_id), fire_series in parts_df.iterrows():
-            unique_fire_name = f"{base_fire_slug}_part_{part_id}"
-            try:
-                gdf_part = process_single_fire(
-                    fire_series=fire_series,
-                    poly_crs=all_polys.crs,
-                    dc=dc,
-                    unique_fire_name=unique_fire_name,
-                    save_per_part_vectors=SAVE_PER_PART_GEOJSON,
-                    save_per_part_rasters=SAVE_PER_PART_RASTERS,
-                    log_path=log_path,
-                    out_dir=group_dir,
-                )
-                if gdf_part is not None and len(gdf_part) > 0:
-                    per_part_gdfs.append(gdf_part)
-                    part_success += 1
-            except Exception as exc:
-                part_fail += 1
-                print(f"!!! FAILED to process part '{unique_fire_name}': {exc}")
-                traceback.print_exc()
-                print("Continuing to next part...")
-
-        if SAVE_COMBINED_PER_FIRE_GEOJSON:
-            if per_part_gdfs:
-                try:
-                    crs_out = per_part_gdfs[0].crs or "EPSG:4283"
-                    combined_gdf = gpd.GeoDataFrame(
-                        pd.concat(per_part_gdfs, ignore_index=True), crs=crs_out
-                    )
-                    combined_gdf = combined_gdf.dissolve(by="severity").reset_index()
-
-                    combined_gdf["fire_id"] = orig_row.get("fire_id", None)
-                    combined_gdf["fire_name"] = base_fire_name
-
-                    ign = orig_row.get("ignition_date", None)
-                    ext = orig_row.get("extinguish_date", None)
-                    combined_gdf["ignition_date"] = (
-                        str(ign)[:10] if pd.notna(ign) else ""
-                    )
-                    combined_gdf["extinguish_date"] = (
-                        "None" if (ext is None or pd.isna(ext)) else str(ext)[:10]
-                    )
-
-                    tmp_path = combined_path + ".tmp"
-                    combined_gdf.to_file(tmp_path, driver="GeoJSON")
-                    os.replace(tmp_path, combined_path)
-
-                    print(f"[COMBINED] Saved MultiPolygon GeoJSON: {combined_path}")
-                    _append_log(log_path, f"# Combined saved: {combined_path}")
-                    combined_success += 1
-                except Exception as exc:
-                    print(f"!!! FAILED to save combined GeoJSON for '{base_fire_name}': {exc}")
-                    traceback.print_exc()
-            else:
-                print(f"No per-part severity vectors to combine for '{base_fire_name}'.")
-                _append_log(log_path, "# No per-part vectors to combine.")
+        try:
+            gdf_fire = process_single_fire(
+                fire_series=fire_series,
+                poly_crs=all_polys.crs,
+                dc=dc,
+                unique_fire_name=base_fire_slug,
+                save_per_part_vectors=SAVE_PER_PART_GEOJSON,
+                save_per_part_rasters=SAVE_PER_PART_RASTERS,
+                log_path=log_path,
+                out_dir=fire_dir,
+            )
+            if gdf_fire is not None and len(gdf_fire) > 0:
+                fire_success += 1
+        except Exception as exc:
+            fire_fail += 1
+            print(f"!!! FAILED to process fire '{base_fire_name}': {exc}")
+            traceback.print_exc()
+            continue
 
         if upload_to_s3:
-            ok = _upload_dir_to_s3_and_cleanup(group_dir, s3_upload_prefix)
+            ok = _upload_dir_to_s3_and_cleanup(fire_dir, s3_upload_prefix)
             if not ok:
                 print(
-                    f"[S3 upload] WARNING: '{group_dir}' was not removed (upload verification failed)."
+                    f"[S3 upload] WARNING: '{fire_dir}' was not removed (upload verification failed)."
                 )
 
     print("\n" + "=" * 80)
     print("Batch processing complete.")
-    print(f"  Per-part success: {part_success}")
-    print(f"  Per-part failed:  {part_fail}")
-    if SAVE_COMBINED_PER_FIRE_GEOJSON:
-        print(f"  Combined (group) success: {combined_success}")
-        print(f"  Combined (group) skipped (exists): {combined_skip}")
+    print(f"  Fire success: {fire_success}")
+    print(f"  Fire failed:  {fire_fail}")
+    print(f"  Fire skipped: {fire_skip}")
     print("=" * 88)
 
 def _decorate_help(text: str, default_value: Any) -> str:
@@ -883,23 +1178,24 @@ def _decorate_help(text: str, default_value: Any) -> str:
     help="Path to input polygons GeoJSON. Local path or S3 URI (s3://...).",
 )
 @click.option(
+    "--polygon-source",
+    type=click.Choice(["file", "database"]),
+    default="file",
+    show_default=True,
+    help="Where to read polygons (file/database).",
+)
+@click.option(
     "--output-dir",
     type=str,
     default=None,
     help=_decorate_help("Output base directory", DEFAULT_CONFIG["output_dir"]),
 )
 @click.option(
-    "--max-fires",
-    type=int,
-    default=None,
-    help=_decorate_help("Process at most this many features", DEFAULT_CONFIG["max_fires"]),
-)
-@click.option(
     "--save-per-part-vectors",
     type=bool,
     default=None,
     help=_decorate_help(
-        "Save per-part GeoJSONs", DEFAULT_CONFIG["save_per_part_vectors"]
+        "Save per-fire GeoJSONs", DEFAULT_CONFIG["save_per_part_vectors"]
     ),
 )
 @click.option(
@@ -907,15 +1203,7 @@ def _decorate_help(text: str, default_value: Any) -> str:
     type=bool,
     default=None,
     help=_decorate_help(
-        "Save per-part COG rasters", DEFAULT_CONFIG["save_per_part_rasters"]
-    ),
-)
-@click.option(
-    "--save-combined-per-fire",
-    type=bool,
-    default=None,
-    help=_decorate_help(
-        "Save combined MultiPolygon GeoJSON per fire", DEFAULT_CONFIG["save_combined_per_fire"]
+        "Save per-fire COG rasters", DEFAULT_CONFIG["save_per_part_rasters"]
     ),
 )
 @click.option(
@@ -946,11 +1234,18 @@ def _decorate_help(text: str, default_value: Any) -> str:
     default=None,
     help=_decorate_help("Datacube app name", DEFAULT_CONFIG["app_name"]),
 )
+@click.option(
+    "--db-table",
+    type=str,
+    default=None,
+    help=_decorate_help("Database table containing polygons", DEFAULT_CONFIG["db_table"]),
+)
 def cli(**kwargs: Any) -> None:
     """
     Console script entry point.
     """
     config_path = kwargs.pop("config", None)
+    polygon_source = kwargs.pop("polygon_source", "file")
 
     user_config: dict[str, Any] | None = None
     if config_path:
@@ -966,15 +1261,30 @@ def cli(**kwargs: Any) -> None:
         if value is not None:
             effective_config[key] = value
 
+    # Force the connection details to remain the baked-in values even if an
+    # external YAML attempts to override them (older configs still reference
+    # env-var placeholders like DB_HOSTNAME/DB_NAME).
+    for hard_key in ("db_host_env", "db_name_env", "db_password_env"):
+        effective_config[hard_key] = HARDCODED_DEFAULT_CONFIG[hard_key]
+
     _apply_config(effective_config)
+
+    normalized_source = str(polygon_source).lower()
+    if normalized_source not in {"file", "database"}:
+        raise SystemExit("--polygon-source must be either 'file' or 'database'.")
+    if normalized_source == "file" and not effective_config.get("polygons"):
+        raise SystemExit(
+            "The --polygons path must be provided when --polygon-source=file."
+        )
+
+    global POLYGON_SOURCE
+    POLYGON_SOURCE = normalized_source
 
     main(
         polygons_path=effective_config["polygons"],
         output_dir=effective_config["output_dir"],
-        max_fires=int(effective_config["max_fires"]),
         save_per_part_vectors=bool(effective_config["save_per_part_vectors"]),
         save_per_part_rasters=bool(effective_config["save_per_part_rasters"]),
-        save_combined=bool(effective_config["save_combined_per_fire"]),
         force_rebuild=bool(effective_config["force_rebuild"]),
         upload_to_s3=bool(effective_config["upload_to_s3"]),
         s3_upload_prefix=effective_config["upload_to_s3_prefix"],
