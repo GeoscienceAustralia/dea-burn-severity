@@ -1,15 +1,12 @@
 """
 Command-line interface for the DEA burn severity classification workflow.
 
-This module is a close adaptation of the original monolithic script supplied
-by the user. The processing logic is preserved while exposing a reusable
-`cli()` function that acts as the console entry point.
+The original monolithic script has been reorganised so configuration,
+severity analytics and CLI entry points live in dedicated modules.
 """
 
 from __future__ import annotations
 
-# Standard library imports
-import copy
 import json
 import os
 import re
@@ -17,231 +14,30 @@ import shutil
 import tempfile
 import traceback
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import urlparse
-from urllib.request import urlopen
 
-# Third-party imports
 import click
 import datacube
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import xarray as xr
-import yaml
 from datacube.utils.cog import write_cog
 from datacube.utils.geometry import CRS, Geometry
 from shapely.geometry import shape
 
-HARDCODED_DEFAULT_CONFIG: dict[str, Any] = {
-    "output_dir": "products",
-    "save_per_part_vectors": True,
-    "save_per_part_rasters": True,
-    "force_rebuild": False,
-    "upload_to_s3": True,
-    "upload_to_s3_prefix": "s3://dea-public-data-dev/projects/burn_cube/derivative/"
-    "dea_burn_severity/result",
-    "app_name": "Burnt_Area_Mapping",
-    "output_crs": "EPSG:3577",
-    "resolution": [-10, 10],
-    "s2_products": ["ga_s2am_ard_3", "ga_s2bm_ard_3", "ga_s2cm_ard_3"],
-    "s2_measurements": [
-        "nbart_blue",
-        "nbart_green",
-        "nbart_red",
-        "nbart_nir_1",
-        "nbart_nir_2",
-        "nbart_swir_2",
-        "nbart_swir_3",
-        "oa_nbart_contiguity",
-        "oa_s2cloudless_mask",
-    ],
-    "pre_fire_buffer_days": 50,
-    "post_fire_start_days": 15,
-    "post_fire_window_days": 60,
-    "grass_classes": [
-        3,
-        14,
-        15,
-        16,
-        17,
-        18,
-        21,
-        32,
-        33,
-        34,
-        35,
-        36,
-        39,
-        50,
-        51,
-        52,
-        53,
-        54,
-        57,
-        78,
-        79,
-        80,
-        81,
-        82,
-        83,
-        84,
-        85,
-        86,
-        87,
-        88,
-        89,
-        90,
-        91,
-        92,
-        94,
-        95,
-        96,
-        97,
-    ],
-    "db_table": "nli_lastboundaries_trigger",
-    "db_columns": [
-        "fire_id",
-        "fire_name",
-        "fire_type",
-        "ignition_date",
-        "capt_date",
-        "capt_method",
-        "area_ha",
-        "perim_km",
-        "state",
-        "agency",
-        "date_retrieved",
-        "date_processed",
-    ],
-    "db_geom_column": "geom",
-    "db_host_env": "DB_HOST_NAME_PLACEHOLDER",
-    "db_name_env": "DB_NAME_PLACEHOLDER",
-    "db_password_env": "PASSWORD_PLACEHOLDER",
-    "db_user": "processing_user_ro",
-    "db_port": 5432,
-    "db_output_crs": "EPSG:4283",
-}
-
-# Local/custom tool imports (available on the environment PYTHONPATH)
 from dea_tools.bandindices import calculate_indices
 from dea_tools.datahandling import load_ard
 from dea_tools.spatial import xr_vectorize
 
-# =========================
-# ========= CONFIG ========
-# =========================
-
-
-def _load_default_config() -> dict[str, Any]:
-    """
-    Return a deep copy of the baked-in default configuration.
-    """
-    return copy.deepcopy(HARDCODED_DEFAULT_CONFIG)
-
-
-def _load_yaml_config(source: str | Path) -> dict[str, Any]:
-    """
-    Load a YAML configuration from a local path, HTTP(S) URL, or S3 URI.
-    """
-    if isinstance(source, Path):
-        text = source.expanduser().read_text(encoding="utf-8")
-    else:
-        parsed = urlparse(str(source))
-        scheme = parsed.scheme.lower()
-        if scheme in ("http", "https"):
-            with urlopen(str(source)) as response:
-                text = response.read().decode("utf-8")
-        elif scheme == "s3":
-            try:
-                import s3fs  # type: ignore
-            except ImportError as exc:  # pragma: no cover - runtime dependency
-                raise RuntimeError(
-                    "Reading s3:// configs requires the 's3fs' package. "
-                    "Install with: pip install s3fs"
-                ) from exc
-            fs = s3fs.S3FileSystem(anon=False)
-            with fs.open(str(source), "rb") as stream:
-                text = stream.read().decode("utf-8")
-        elif scheme in ("", "file"):
-            path = Path(parsed.path) if scheme else Path(str(source))
-            text = path.expanduser().read_text(encoding="utf-8")
-        else:
-            raise ValueError(f"Unsupported configuration scheme '{scheme}' for '{source}'.")
-    data = yaml.safe_load(text)
-    if not isinstance(data, dict):
-        raise ValueError("Configuration YAML must define a mapping at the top level.")
-    return data
-
-
-def _merge_config(base: dict[str, Any], override: dict[str, Any] | None) -> dict[str, Any]:
-    merged = copy.deepcopy(base)
-    if override:
-        merged.update(override)
-    return merged
-
-
-def _apply_config(settings: dict[str, Any]) -> None:
-    """
-    Update module-level configuration variables from the provided settings.
-    """
-    global OUTPUT_PRODUCT_DIR
-    global SAVE_PER_PART_GEOJSON, SAVE_PER_PART_RASTERS
-    global FORCE_REBUILD
-    global DEFAULT_S3_UPLOAD_PREFIX, UPLOAD_TO_S3
-    global OUTPUT_CRS, RESOLUTION, S2_PRODUCTS, S2_MEASUREMENTS
-    global PRE_FIRE_BUFFER_DAYS, POST_FIRE_START_DAYS, POST_FIRE_WINDOW_DAYS
-    global GRASS_CLASSES
-    global POLYGON_SOURCE, DB_TABLE, DB_COLUMNS, DB_GEOM_COLUMN
-    global DB_HOST_ENV, DB_NAME_ENV, DB_PASSWORD_ENV, DB_USER, DB_PORT, DB_OUTPUT_CRS
-
-    OUTPUT_PRODUCT_DIR = settings["output_dir"]
-    SAVE_PER_PART_GEOJSON = bool(settings["save_per_part_vectors"])
-    SAVE_PER_PART_RASTERS = bool(settings["save_per_part_rasters"])
-    FORCE_REBUILD = bool(settings.get("force_rebuild", False))
-
-    DEFAULT_S3_UPLOAD_PREFIX = settings["upload_to_s3_prefix"]
-    UPLOAD_TO_S3 = bool(settings["upload_to_s3"])
-
-    OUTPUT_CRS = settings["output_crs"]
-    resolution_values = list(settings["resolution"])
-    if len(resolution_values) != 2:
-        raise ValueError("Configuration 'resolution' must contain exactly two values.")
-    RESOLUTION = (resolution_values[0], resolution_values[1])
-    S2_PRODUCTS = list(settings["s2_products"])
-    S2_MEASUREMENTS = list(settings["s2_measurements"])
-
-    PRE_FIRE_BUFFER_DAYS = int(settings["pre_fire_buffer_days"])
-    POST_FIRE_START_DAYS = int(settings["post_fire_start_days"])
-    POST_FIRE_WINDOW_DAYS = int(settings["post_fire_window_days"])
-
-    GRASS_CLASSES = list(settings["grass_classes"])
-    DB_TABLE = settings.get("db_table", "nli_lastboundaries_trigger")
-    DB_COLUMNS = list(settings.get("db_columns", []))
-    DB_GEOM_COLUMN = settings.get("db_geom_column", "geom")
-    DB_HOST_ENV = settings.get("db_host_env", "DB_HOST_NAME_PLACEHOLDER")
-    DB_NAME_ENV = settings.get("db_name_env", "DB_NAME_PLACEHOLDER")
-    DB_PASSWORD_ENV = settings.get("db_password_env", "PASSWORD_PLACEHOLDER")
-    DB_USER = settings.get("db_user", "processing_user_ro")
-    DB_PORT = int(settings.get("db_port", 5432))
-    DB_OUTPUT_CRS = settings.get("db_output_crs", "EPSG:4283")
-
-
-DEFAULT_CONFIG = _load_default_config()
-_apply_config(DEFAULT_CONFIG)
-
-# Mapping of CLI options that can override configuration keys.
-CLI_CONFIG_KEYS = (
-    "output_dir",
-    "save_per_part_vectors",
-    "save_per_part_rasters",
-    "force_rebuild",
-    "upload_to_s3_prefix",
-    "upload_to_s3",
-    "app_name",
-    "db_table",
+from .configuration import (
+    DEFAULT_CONFIG_DICT,
+    RuntimeConfig,
+    build_runtime_config,
+    get_default_runtime_config,
 )
+from .severity import calculate_severity, create_debug_mask
+
 
 LOAD_DASK_CHUNKS: dict[str, int] = {"x": 2048, "y": 2048}
 
@@ -287,12 +83,6 @@ IGNITION_DATE_FIELDS: tuple[str, ...] = ("ignition_date", "ignition_d")
 EXTINGUISH_DATE_FIELDS: tuple[str, ...] = ("extinguish_date", "date_retrieved", "date_retri")
 
 DB_SCHEMA = "public"
-DB_TABLE = ""
-DB_COLUMNS: list[str] = []
-DB_GEOM_COLUMN = "geom"
-DB_USER = "processing_user_ro"
-DB_PORT = 5432
-DB_OUTPUT_CRS = "EPSG:4283"
 
 
 # =============================
@@ -425,13 +215,13 @@ def _read_geojson_maybe_s3(path: str) -> gpd.GeoDataFrame:
     return gpd.read_file(path)
 
 
-def _load_polygons_from_database() -> gpd.GeoDataFrame:
+def _load_polygons_from_database(config: RuntimeConfig) -> gpd.GeoDataFrame:
     """
     Load polygons directly from the configured PostgreSQL/PostGIS table.
     """
-    if not DB_TABLE:
+    if not config.db_table:
         raise ValueError("Configuration 'db_table' must be provided for database polygon loading.")
-    if not DB_COLUMNS:
+    if not config.db_columns:
         raise ValueError("Configuration 'db_columns' must include at least one attribute column.")
 
     try:
@@ -444,27 +234,29 @@ def _load_polygons_from_database() -> gpd.GeoDataFrame:
         ) from exc
 
     conn = psycopg2.connect(
-        host=DB_HOST_ENV,
-        dbname=DB_NAME_ENV,
-        port=str(DB_PORT),
-        user=DB_USER,
-        password=DB_PASSWORD_ENV,
+        host=config.db_host,
+        dbname=config.db_name,
+        port=str(config.db_port),
+        user=config.db_user,
+        password=config.db_password,
     )
 
     table_identifier = (
-        sql.Identifier(DB_SCHEMA, DB_TABLE) if DB_SCHEMA else sql.Identifier(DB_TABLE)
+        sql.Identifier(DB_SCHEMA, config.db_table)
+        if DB_SCHEMA
+        else sql.Identifier(config.db_table)
     )
-    select_clause = sql.SQL(", ").join(sql.Identifier(col) for col in DB_COLUMNS)
+    select_clause = sql.SQL(", ").join(sql.Identifier(col) for col in config.db_columns)
     query = sql.SQL(
         "SELECT {fields}, ST_AsGeoJSON({geom}) AS geom_geojson FROM {table}"
     ).format(
         fields=select_clause,
-        geom=sql.Identifier(DB_GEOM_COLUMN),
+        geom=sql.Identifier(config.db_geom_column),
         table=table_identifier,
     )
 
     print(
-        f"Querying polygons from table '{DB_SCHEMA + '.' if DB_SCHEMA else ''}{DB_TABLE}'..."
+        f"Querying polygons from table '{DB_SCHEMA + '.' if DB_SCHEMA else ''}{config.db_table}'..."
     )
     records: list[dict[str, Any]] = []
     failures = 0
@@ -487,7 +279,7 @@ def _load_polygons_from_database() -> gpd.GeoDataFrame:
                     print(f"Warning: Failed to parse geometry for row {idx}: {exc}")
                     continue
 
-                record = {col: val for col, val in zip(DB_COLUMNS, attr_values)}
+                record = {col: val for col, val in zip(config.db_columns, attr_values)}
                 record["geometry"] = geom_obj
                 records.append(record)
     finally:
@@ -496,18 +288,20 @@ def _load_polygons_from_database() -> gpd.GeoDataFrame:
     if failures:
         print(f"Skipped {failures} rows due to geometry parsing errors.")
     if not records:
-        return gpd.GeoDataFrame(columns=[*DB_COLUMNS, "geometry"], crs=DB_OUTPUT_CRS)
+        return gpd.GeoDataFrame(
+            columns=[*config.db_columns, "geometry"], crs=config.db_output_crs
+        )
 
-    return gpd.GeoDataFrame(records, crs=DB_OUTPUT_CRS)
+    return gpd.GeoDataFrame(records, crs=config.db_output_crs)
 
 
-def load_and_prepare_polygons() -> gpd.GeoDataFrame | None:
+def load_and_prepare_polygons(config: RuntimeConfig) -> gpd.GeoDataFrame | None:
     """
     Loads fire polygons from the configured database and prepares them for processing.
     Dissolves by 'fire_id' if available to ensure one row per fire.
     """
     try:
-        poly_gdf = _load_polygons_from_database()
+        poly_gdf = _load_polygons_from_database(config)
     except Exception as exc:
         print(f"Error: Failed loading polygons from database: {exc}")
         return None
@@ -531,6 +325,7 @@ def load_ard_with_fallback(
     dc: datacube.Datacube,
     gpgon: Geometry,
     time: tuple[str, str],
+    config: RuntimeConfig,
     min_gooddata_thresholds: Iterable[float] = (0.99, 0.90),
     **kwargs,
 ) -> xr.Dataset:
@@ -539,12 +334,12 @@ def load_ard_with_fallback(
     """
     base_params = {
         "dc": dc,
-        "products": S2_PRODUCTS,
+        "products": config.s2_products,
         "geopolygon": gpgon,
         "time": time,
-        "measurements": S2_MEASUREMENTS,
-        "output_crs": OUTPUT_CRS,
-        "resolution": RESOLUTION,
+        "measurements": config.s2_measurements,
+        "output_crs": config.output_crs,
+        "resolution": config.resolution,
         "group_by": "solar_day",
         "cloud_mask": "s2cloudless",
         "dask_chunks": LOAD_DASK_CHUNKS,
@@ -568,7 +363,7 @@ def load_ard_with_fallback(
 
 
 def load_baseline_stack(
-    dc: datacube.Datacube, gpgon: Geometry, time: tuple[str, str]
+    dc: datacube.Datacube, gpgon: Geometry, time: tuple[str, str], config: RuntimeConfig
 ) -> tuple[xr.Dataset, xr.Dataset | None]:
     """
     Load baseline ARD with strict cloud limits, then fall back to a relaxed
@@ -576,12 +371,12 @@ def load_baseline_stack(
     """
     base_params = {
         "dc": dc,
-        "products": S2_PRODUCTS,
+        "products": config.s2_products,
         "geopolygon": gpgon,
         "time": time,
-        "measurements": S2_MEASUREMENTS,
-        "output_crs": OUTPUT_CRS,
-        "resolution": RESOLUTION,
+        "measurements": config.s2_measurements,
+        "output_crs": config.output_crs,
+        "resolution": config.resolution,
         "group_by": "solar_day",
         "cloud_mask": "s2cloudless",
         "dask_chunks": LOAD_DASK_CHUNKS,
@@ -603,82 +398,6 @@ def load_baseline_stack(
 
     composite = find_latest_valid_pixel(baseline)
     return baseline, composite
-
-
-def calculate_severity(
-    delta_nbr: xr.DataArray, landcover: xr.Dataset, grass_classes: list[int]
-) -> xr.DataArray:
-    """
-    Calculates burn severity using different thresholds for woody vs. grass.
-    """
-    print("Calculating severity based on landcover...")
-
-    # 1) Grass mask from DEA landcover product
-    grass_mask = landcover.level4.isin(grass_classes)
-
-    # 2) Woody severity thresholds on dNBR (delta_nbr.NBR)
-    sev_woody = xr.zeros_like(delta_nbr.NBR, dtype=np.uint8)
-    sev_woody = xr.where(delta_nbr.NBR >= 0.10, 2, sev_woody)  # Low
-    sev_woody = xr.where(delta_nbr.NBR >= 0.27, 3, sev_woody)  # Medium
-    sev_woody = xr.where(delta_nbr.NBR >= 0.44, 4, sev_woody)  # High
-    sev_woody = xr.where(delta_nbr.NBR >= 0.66, 5, sev_woody)  # Very High
-
-    severity_woody_masked = sev_woody.where(grass_mask == 0, 0)
-
-    # 3) Grass severity: binary (class 1)
-    severity_grass = grass_mask.where(delta_nbr.NBR >= 0.10, 0)
-
-    # 4) Combine
-    severity = severity_woody_masked + severity_grass
-    severity.name = "severity"
-    return severity
-
-
-def create_debug_mask(pre_fire_scene: xr.Dataset, post_fire_stack: xr.Dataset) -> xr.DataArray:
-    """
-    Creates a mask for pixels to be excluded from the analysis.
-    Encodes classes as additive flags (1, 10, 100, 1000, 10000).
-    """
-    print("Creating debug/masking layer...")
-
-    debug_layer_blank = xr.ones_like(pre_fire_scene.nbart_red, dtype=np.uint16)
-
-    # 1) Water (post-fire): MNDWI > 0
-    post_mndwi = calculate_indices(
-        post_fire_stack, index="MNDWI", collection="ga_s2_3", drop=True
-    )
-    max_mndwi = post_mndwi.max("time")
-    post_water = debug_layer_blank.where(max_mndwi.MNDWI > 0, 0)  # class 1
-    new_debug = post_water
-
-    # 2) Pre-fire cloud
-    pre_cloud = (debug_layer_blank.where(pre_fire_scene.oa_s2cloudless_mask == 2, 0)) * 10
-    new_debug = new_debug + pre_cloud
-
-    # 3) Persistent cloud (post-fire)
-    post_cloud = post_fire_stack.oa_s2cloudless_mask.where(
-        post_fire_stack.oa_s2cloudless_mask >= 1, 1
-    )
-    persistent_cloud = post_cloud.min("time")
-    post_cloud_mask = (debug_layer_blank.where(persistent_cloud == 2, 0)) * 100
-    new_debug = new_debug + post_cloud_mask
-
-    # 4) Pre-fire contiguity
-    pre_contiguity = (
-        debug_layer_blank.where(pre_fire_scene.oa_nbart_contiguity != 1, 0)
-    ) * 1000
-    new_debug = new_debug + pre_contiguity
-
-    # 5) Persistent contiguity (post-fire)
-    post_contiguity = post_fire_stack.oa_nbart_contiguity.where(
-        post_fire_stack.oa_nbart_contiguity == 1, 0
-    )
-    persistent_cont = post_contiguity.max("time")
-    post_contiguity_mask = (debug_layer_blank.where(persistent_cont != 1, 0)) * 10000
-    new_debug = new_debug + post_contiguity_mask
-
-    new_debug.name = "debug_mask"
-    return new_debug
 
 
 def _append_log(log_path: str, line: str) -> None:
@@ -752,8 +471,7 @@ def process_single_fire(
     poly_crs: CRS,
     dc: datacube.Datacube,
     unique_fire_name: str,
-    save_per_part_vectors: bool = SAVE_PER_PART_GEOJSON,
-    save_per_part_rasters: bool = SAVE_PER_PART_RASTERS,
+    config: RuntimeConfig,
     log_path: str | None = None,
     out_dir: str | None = None,
 ) -> gpd.GeoDataFrame | None:
@@ -791,7 +509,7 @@ def process_single_fire(
     extinguish_date = extinguish_date_value if extinguish_date_value else "None"
 
     start_date_pre = (
-        datetime.strptime(fire_date, "%Y-%m-%d") - timedelta(days=PRE_FIRE_BUFFER_DAYS)
+        datetime.strptime(fire_date, "%Y-%m-%d") - timedelta(days=config.pre_fire_buffer_days)
     ).strftime("%Y-%m-%d")
     end_date_pre = (
         datetime.strptime(fire_date, "%Y-%m-%d") - timedelta(days=1)
@@ -799,19 +517,20 @@ def process_single_fire(
 
     if extinguish_date == "None":
         start_date_post = (
-            datetime.strptime(fire_date, "%Y-%m-%d") + timedelta(days=POST_FIRE_START_DAYS)
+            datetime.strptime(fire_date, "%Y-%m-%d") + timedelta(days=config.post_fire_start_days)
         ).strftime("%Y-%m-%d")
     else:
         start_date_post = extinguish_date
 
     end_date_post = (
-        datetime.strptime(start_date_post, "%Y-%m-%d") + timedelta(days=POST_FIRE_WINDOW_DAYS)
+        datetime.strptime(start_date_post, "%Y-%m-%d")
+        + timedelta(days=config.post_fire_window_days)
     ).strftime("%Y-%m-%d")
 
     landcover_year = str(int(fire_date[0:4]) - 1)
 
     baseline, closest_bl = load_baseline_stack(
-        dc, gpgon, time=(start_date_pre, end_date_pre)
+        dc, gpgon, time=(start_date_pre, end_date_pre), config=config
     )
     if closest_bl is None:
         if log_path:
@@ -824,7 +543,11 @@ def process_single_fire(
         return None
 
     post = load_ard_with_fallback(
-        dc, gpgon, time=(start_date_post, end_date_post), min_gooddata_thresholds=(0.90,)
+        dc,
+        gpgon,
+        time=(start_date_post, end_date_post),
+        config=config,
+        min_gooddata_thresholds=(0.90,),
     )
     if post.time.size == 0:
         if log_path:
@@ -849,8 +572,8 @@ def process_single_fire(
         product="ga_ls_landcover_class_cyear_3",
         geopolygon=gpgon,
         time=(landcover_year),
-        output_crs=OUTPUT_CRS,
-        resolution=RESOLUTION,
+        output_crs=config.output_crs,
+        resolution=config.resolution,
         group_by="solar_day",
         dask_chunks={},
     )
@@ -875,7 +598,7 @@ def process_single_fire(
     min_post_nbr = post_nbr.min("time")
     delta_nbr = pre_nbr - min_post_nbr
 
-    severity = calculate_severity(delta_nbr, landcover, GRASS_CLASSES)
+    severity = calculate_severity(delta_nbr, landcover, config.grass_classes)
 
     debug_mask = create_debug_mask(closest_bl, post)
     final_severity = severity.where(debug_mask == 0, 6)
@@ -938,7 +661,10 @@ def process_single_fire(
 
     print("Vectorizing severity raster...")
     severity_vectors = xr_vectorize(
-        final_severity, attribute_col="severity", crs=OUTPUT_CRS, mask=final_severity != 0
+        final_severity,
+        attribute_col="severity",
+        crs=config.output_crs,
+        mask=final_severity != 0,
     )
     if severity_vectors.empty:
         print("No burn area detected for this fire.")
@@ -960,28 +686,20 @@ def process_single_fire(
             continue
         aggregated[key] = value
 
-    base_dir = out_dir if out_dir else OUTPUT_PRODUCT_DIR
+    base_dir = out_dir if out_dir else config.output_dir
     os.makedirs(base_dir, exist_ok=True)
 
-    if save_per_part_vectors:
-        out_vec = os.path.join(
-            base_dir, f"burn_severity_polygons_{fire_slug}.geojson"
-        )
-        aggregated.to_file(out_vec, driver="GeoJSON")
-        print(f"Saved per-fire severity GeoJSON: {out_vec}")
+    out_vec = os.path.join(base_dir, f"burn_severity_polygons_{fire_slug}.geojson")
+    aggregated.to_file(out_vec, driver="GeoJSON")
+    print(f"Saved per-fire severity GeoJSON: {out_vec}")
 
-    if save_per_part_rasters:
-        out_cog_preview = os.path.join(
-            base_dir, f"s2_postfire_preview_{fire_slug}.tif"
-        )
-        write_cog(
-            post.isel(time=0).to_array().compute(), fname=out_cog_preview, overwrite=True
-        )
-        print(f"Saved post-fire preview COG: {out_cog_preview}")
+    out_cog_preview = os.path.join(base_dir, f"s2_postfire_preview_{fire_slug}.tif")
+    write_cog(post.isel(time=0).to_array().compute(), fname=out_cog_preview, overwrite=True)
+    print(f"Saved post-fire preview COG: {out_cog_preview}")
 
-        out_cog_debug = os.path.join(base_dir, f"debug_mask_raster_{fire_slug}.tif")
-        write_cog(debug_mask.compute(), fname=out_cog_debug, overwrite=True)
-        print(f"Saved debug mask COG: {out_cog_debug}")
+    out_cog_debug = os.path.join(base_dir, f"debug_mask_raster_{fire_slug}.tif")
+    write_cog(debug_mask.compute(), fname=out_cog_debug, overwrite=True)
+    print(f"Saved debug mask COG: {out_cog_debug}")
 
     print(f"Successfully processed fire: {fire_display_name}")
     return aggregated
@@ -1000,30 +718,17 @@ def _is_valid_geojson(path: str) -> bool:
         return False
 
 
-def main(
-    output_dir: str = OUTPUT_PRODUCT_DIR,
-    save_per_part_vectors: bool = SAVE_PER_PART_GEOJSON,
-    save_per_part_rasters: bool = SAVE_PER_PART_RASTERS,
-    force_rebuild: bool = FORCE_REBUILD,
-    upload_to_s3: bool = UPLOAD_TO_S3,
-    s3_upload_prefix: str = DEFAULT_S3_UPLOAD_PREFIX,
-    app_name: str = DEFAULT_CONFIG["app_name"],
-) -> None:
+def main(config: RuntimeConfig | None = None) -> None:
     """
     Entry point for processing burn severity polygons.
     """
-    global OUTPUT_PRODUCT_DIR
-    global SAVE_PER_PART_GEOJSON, SAVE_PER_PART_RASTERS
-    global FORCE_REBUILD
+    runtime = config or get_default_runtime_config()
 
-    OUTPUT_PRODUCT_DIR = output_dir
-    SAVE_PER_PART_GEOJSON = save_per_part_vectors
-    SAVE_PER_PART_RASTERS = save_per_part_rasters
-    FORCE_REBUILD = force_rebuild
+    os.makedirs(runtime.output_dir, exist_ok=True)
+    print(f"All outputs will be saved to: {runtime.output_dir}")
 
-    os.makedirs(OUTPUT_PRODUCT_DIR, exist_ok=True)
-    print(f"All outputs will be saved to: {OUTPUT_PRODUCT_DIR}")
-
+    upload_to_s3 = runtime.upload_to_s3
+    s3_prefix = runtime.upload_to_s3_prefix
     s3_fs = None
     if upload_to_s3:
         try:
@@ -1036,20 +741,18 @@ def main(
             print(f"Details: {exc}")
             upload_to_s3 = False
 
-    dc = datacube.Datacube(app=app_name)
+    dc = datacube.Datacube(app=runtime.app_name)
 
-    all_polys = load_and_prepare_polygons()
+    all_polys = load_and_prepare_polygons(runtime)
     if all_polys is None or all_polys.empty:
         print("No polygons loaded. Exiting.")
         return
 
     print(f"Found {len(all_polys)} total features. Processing all of them.")
-    polys_to_process = all_polys
-
     fire_success = fire_fail = fire_skip = 0
 
     print("\nBeginning per-fire processing (single polygon per feature)...")
-    for idx, fire_series in polys_to_process.iterrows():
+    for idx, fire_series in all_polys.iterrows():
         fire_attrs = _extract_attribute_values(fire_series)
         if fire_attrs.get("fire_name"):
             base_fire_name = str(fire_attrs["fire_name"]).strip()
@@ -1065,7 +768,7 @@ def main(
         if os.altsep:
             base_fire_slug = base_fire_slug.replace(os.altsep, "_")
 
-        fire_dir = os.path.join(OUTPUT_PRODUCT_DIR, base_fire_slug)
+        fire_dir = os.path.join(runtime.output_dir, base_fire_slug)
         os.makedirs(fire_dir, exist_ok=True)
 
         final_vector_path = os.path.join(
@@ -1085,13 +788,13 @@ def main(
             )
 
         skip_due_to_output = False
-        if not FORCE_REBUILD:
+        if not runtime.force_rebuild:
             if _is_valid_geojson(final_vector_path):
                 print(f"[Fire '{base_fire_name}'] Local output exists & valid. Skipping.")
                 fire_skip += 1
                 skip_due_to_output = True
             elif upload_to_s3 and s3_fs is not None:
-                bucket, prefix = _parse_s3_uri(s3_upload_prefix)
+                bucket, prefix = _parse_s3_uri(s3_prefix)
                 remote_key = (
                     f"{prefix}/{base_fire_slug}/"
                     f"burn_severity_polygons_{base_fire_slug}.geojson"
@@ -1114,8 +817,7 @@ def main(
                 poly_crs=all_polys.crs,
                 dc=dc,
                 unique_fire_name=base_fire_slug,
-                save_per_part_vectors=SAVE_PER_PART_GEOJSON,
-                save_per_part_rasters=SAVE_PER_PART_RASTERS,
+                config=runtime,
                 log_path=log_path,
                 out_dir=fire_dir,
             )
@@ -1128,7 +830,7 @@ def main(
             continue
 
         if upload_to_s3:
-            ok = _upload_dir_to_s3_and_cleanup(fire_dir, s3_upload_prefix)
+            ok = _upload_dir_to_s3_and_cleanup(fire_dir, s3_prefix)
             if not ok:
                 print(
                     f"[S3 upload] WARNING: '{fire_dir}' was not removed (upload verification failed)."
@@ -1156,36 +858,20 @@ def _decorate_help(text: str, default_value: Any) -> str:
     "--output-dir",
     type=str,
     default=None,
-    help=_decorate_help("Output base directory", DEFAULT_CONFIG["output_dir"]),
-)
-@click.option(
-    "--save-per-part-vectors",
-    type=bool,
-    default=None,
-    help=_decorate_help(
-        "Save per-fire GeoJSONs", DEFAULT_CONFIG["save_per_part_vectors"]
-    ),
-)
-@click.option(
-    "--save-per-part-rasters",
-    type=bool,
-    default=None,
-    help=_decorate_help(
-        "Save per-fire COG rasters", DEFAULT_CONFIG["save_per_part_rasters"]
-    ),
+    help=_decorate_help("Output base directory", DEFAULT_CONFIG_DICT["output_dir"]),
 )
 @click.option(
     "--force-rebuild",
     type=bool,
     default=None,
-    help=_decorate_help("Rebuild even if outputs exist", DEFAULT_CONFIG["force_rebuild"]),
+    help=_decorate_help("Rebuild even if outputs exist", DEFAULT_CONFIG_DICT["force_rebuild"]),
 )
 @click.option(
     "--upload-to-s3-prefix",
     type=str,
     default=None,
     help=_decorate_help(
-        "S3 prefix to upload each per-fire subfolder", DEFAULT_CONFIG["upload_to_s3_prefix"]
+        "S3 prefix to upload each per-fire subfolder", DEFAULT_CONFIG_DICT["upload_to_s3_prefix"]
     ),
 )
 @click.option(
@@ -1193,20 +879,20 @@ def _decorate_help(text: str, default_value: Any) -> str:
     type=bool,
     default=None,
     help=_decorate_help(
-        "Enable S3 upload and local cleanup", DEFAULT_CONFIG["upload_to_s3"]
+        "Enable S3 upload and local cleanup", DEFAULT_CONFIG_DICT["upload_to_s3"]
     ),
 )
 @click.option(
     "--app-name",
     type=str,
     default=None,
-    help=_decorate_help("Datacube app name", DEFAULT_CONFIG["app_name"]),
+    help=_decorate_help("Datacube app name", DEFAULT_CONFIG_DICT["app_name"]),
 )
 @click.option(
     "--db-table",
     type=str,
     default=None,
-    help=_decorate_help("Database table containing polygons", DEFAULT_CONFIG["db_table"]),
+    help=_decorate_help("Database table containing polygons", DEFAULT_CONFIG_DICT["db_table"]),
 )
 def cli(**kwargs: Any) -> None:
     """
@@ -1214,37 +900,12 @@ def cli(**kwargs: Any) -> None:
     """
     config_path = kwargs.pop("config", None)
 
-    user_config: dict[str, Any] | None = None
-    if config_path:
-        try:
-            user_config = _load_yaml_config(config_path)
-        except Exception as exc:
-            raise SystemExit(f"Failed to load configuration from '{config_path}': {exc}") from exc
+    try:
+        runtime_config = build_runtime_config(kwargs, config_path)
+    except Exception as exc:
+        raise SystemExit(f"Failed to load configuration: {exc}") from exc
 
-    effective_config = _merge_config(DEFAULT_CONFIG, user_config)
-
-    for key in CLI_CONFIG_KEYS:
-        value = kwargs.get(key)
-        if value is not None:
-            effective_config[key] = value
-
-    # Force the connection details to remain the baked-in values even if an
-    # external YAML attempts to override them (older configs still reference
-    # env-var placeholders like DB_HOSTNAME/DB_NAME).
-    for hard_key in ("db_host_env", "db_name_env", "db_password_env"):
-        effective_config[hard_key] = HARDCODED_DEFAULT_CONFIG[hard_key]
-
-    _apply_config(effective_config)
-
-    main(
-        output_dir=effective_config["output_dir"],
-        save_per_part_vectors=bool(effective_config["save_per_part_vectors"]),
-        save_per_part_rasters=bool(effective_config["save_per_part_rasters"]),
-        force_rebuild=bool(effective_config["force_rebuild"]),
-        upload_to_s3=bool(effective_config["upload_to_s3"]),
-        s3_upload_prefix=effective_config["upload_to_s3_prefix"],
-        app_name=effective_config["app_name"],
-    )
+    main(runtime_config)
 
 
 if __name__ == "__main__":
