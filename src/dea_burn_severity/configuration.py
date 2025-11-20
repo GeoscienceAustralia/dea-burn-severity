@@ -31,11 +31,11 @@ CLI_CONFIG_KEYS = (
 )
 
 REQUIRED_DB_ENV_VARS: dict[str, str] = {
-    "db_host": "DB_HOSTNAME",
-    "db_name": "DB_NAME",
-    "db_password": "DB_PASSWORD",
-    "db_user": "DB_USER",
-    "db_port": "DB_PORT",
+    "db_host": "BURN_DB_HOSTNAME",
+    "db_name": "BURN_DB_NAME",
+    "db_password": "BURN_DB_PASSWORD",
+    "db_user": "BURN_DB_USER",
+    "db_port": "BURN_DB_PORT",
 }
 
 
@@ -139,23 +139,6 @@ class RuntimeConfig:
         }
 
 
-def load_default_config() -> dict[str, Any]:
-    """
-    Load the packaged default YAML configuration (with optional remote fallback).
-    """
-    source: str | Path = PACKAGE_CONFIG_PATH
-    try:
-        raw_config = load_yaml_config(source)
-    except OSError:
-        source = DEFAULT_CONFIG_URL
-        raw_config = load_yaml_config(source)
-    return copy.deepcopy(raw_config)
-
-
-DEFAULT_CONFIG_DICT = load_default_config()
-DEFAULT_RUNTIME_CONFIG: RuntimeConfig | None = None
-
-
 def _load_text_from_source(source: str | Path) -> str:
     """
     Load a text file from local disk, HTTP(S) or S3.
@@ -193,6 +176,23 @@ def load_yaml_config(source: str | Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("Configuration YAML must define a mapping at the top level.")
     return data
+
+
+def load_default_config() -> dict[str, Any]:
+    """
+    Load the packaged default YAML configuration (with optional remote fallback).
+    """
+    source: str | Path = PACKAGE_CONFIG_PATH
+    try:
+        raw_config = load_yaml_config(source)
+    except OSError:
+        source = DEFAULT_CONFIG_URL
+        raw_config = load_yaml_config(source)
+    return copy.deepcopy(raw_config)
+
+
+DEFAULT_CONFIG_DICT = load_default_config()
+DEFAULT_RUNTIME_CONFIG: RuntimeConfig | None = None
 
 
 def merge_config(base: dict[str, Any], override: dict[str, Any] | None) -> dict[str, Any]:
