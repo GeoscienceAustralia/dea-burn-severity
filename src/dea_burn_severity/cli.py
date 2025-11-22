@@ -455,8 +455,9 @@ def _s3_key_exists_and_nonempty(fs, bucket: str, key: str) -> bool:
 
 def _upload_dir_to_s3_and_cleanup(local_dir: str, s3_prefix: str) -> bool:
     """
-    Upload local_dir recursively to <s3_prefix>/<basename(local_dir)>/*
-    and, on success (existence + size checks), delete local_dir.
+    Upload local_dir recursively into the supplied S3 prefix and, on success,
+    delete local_dir. All files land directly under the configured prefix, so
+    there is a single folder on S3 for every fire's artefacts.
     """
     if not os.path.isdir(local_dir):
         print(f"[S3 upload] Local directory does not exist: {local_dir}")
@@ -465,9 +466,7 @@ def _upload_dir_to_s3_and_cleanup(local_dir: str, s3_prefix: str) -> bool:
     import s3fs  # type: ignore
 
     bucket, key_prefix = _parse_s3_uri(s3_prefix)
-    dest_base = key_prefix.strip("/")
-    slug = os.path.basename(os.path.normpath(local_dir))
-    dest_dir_key = f"{dest_base}/{slug}"
+    dest_dir_key = key_prefix.strip("/")
 
     fs = s3fs.S3FileSystem(anon=False)
 
@@ -483,9 +482,17 @@ def _upload_dir_to_s3_and_cleanup(local_dir: str, s3_prefix: str) -> bool:
         print(f"[S3 upload] Nothing to upload from {local_dir}")
         return False
 
-    print(f"[S3 upload] Uploading '{local_dir}' -> 's3://{bucket}/{dest_dir_key}/' ...")
+    if dest_dir_key:
+        target_display = f"s3://{bucket}/{dest_dir_key}/"
+    else:
+        target_display = f"s3://{bucket}/"
+
+    print(f"[S3 upload] Uploading '{local_dir}' -> '{target_display}' ...")
     for rel, _, full in local_files:
-        remote_key = f"{dest_dir_key}/{rel}"
+        if dest_dir_key:
+            remote_key = f"{dest_dir_key}/{rel}"
+        else:
+            remote_key = rel
         fs.put(full, f"{bucket}/{remote_key}")
 
     shutil.rmtree(local_dir, ignore_errors=True)
@@ -831,8 +838,10 @@ def main(config: RuntimeConfig | None = None) -> None:
                 skip_due_to_output = True
             elif upload_to_s3 and s3_fs is not None:
                 bucket, prefix = _parse_s3_uri(s3_prefix)
+                prefix = prefix.strip("/")
+                prefix_part = f"{prefix}/" if prefix else ""
                 remote_key = (
-                    f"{prefix}/{base_fire_slug}/results/{vector_filename}"
+                    f"{prefix_part}results/{vector_filename}"
                 )
                 if _s3_key_exists_and_nonempty(s3_fs, bucket, remote_key):
                     print(
@@ -908,7 +917,7 @@ def _decorate_help(text: str, default_value: Any) -> str:
     type=str,
     default=None,
     help=_decorate_help(
-        "S3 prefix to upload each per-fire subfolder", DEFAULT_CONFIG_DICT["upload_to_s3_prefix"]
+        "S3 prefix to upload all outputs (shared folder)", DEFAULT_CONFIG_DICT["upload_to_s3_prefix"]
     ),
 )
 @click.option(
