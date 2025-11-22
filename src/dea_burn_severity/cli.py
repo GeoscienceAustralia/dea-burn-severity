@@ -410,7 +410,7 @@ def load_baseline_stack(
     }
 
     baseline = load_ard(**base_params)
-    if baseline.time.size > 0:
+    if baseline.time.size > 0: # we find the good data
         return baseline, baseline.isel(time=-1)
 
     print("Baseline load empty; retrying with mask dilation and relaxed clouds.")
@@ -418,10 +418,14 @@ def load_baseline_stack(
         "mask_filters": [("dilation", 15)],
         "min_gooddata": 0.20,
     }
+    # we change the QC request and do again
     baseline = load_ard(**relaxed_params)
+
+    # if no data again, return empty
     if baseline.time.size == 0:
         return baseline, None
 
+    # return the new QC data, but also a composite of latest valid pixels
     composite = find_latest_valid_pixel(baseline)
     return baseline, composite
 
