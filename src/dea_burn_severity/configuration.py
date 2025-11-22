@@ -31,10 +31,10 @@ CLI_CONFIG_KEYS = (
 )
 
 REQUIRED_DB_ENV_VARS: dict[str, str] = {
-    "db_host": "DB_HOSTNAME",
-    "db_name": "DB_NAME",
-    "db_password": "DB_PASSWORD",
-    "db_user": "DB_USER",
+    "db_host": "FIRE_DB_HOSTNAME",
+    "db_name": "FIRE_DB_NAME",
+    "db_password": "FIRE_DB_PASSWORD",
+    "db_user": "FIRE_DB_USERNAME",
     "db_port": "DB_PORT",
 }
 
@@ -223,21 +223,14 @@ def build_runtime_config(
             merged[key] = value
 
     for config_key, env_var in REQUIRED_DB_ENV_VARS.items():
-        if config_key in merged and merged[config_key]:
-            continue
-        env_value = os.environ.get(env_var)
-        if env_value is None:
-            raise RuntimeError(
-                f"Environment variable '{env_var}' must be set to supply '{config_key}'."
-            )
-        merged[config_key] = env_value
+        merged[config_key] = os.environ.get(env_var, "")
 
     return RuntimeConfig.from_dict(merged)
 
 
 def get_default_runtime_config() -> RuntimeConfig:
     """
-    Lazily build the default runtime configuration (requires DB env vars).
+    Lazily build the default runtime configuration using DB values from env vars.
     """
     global DEFAULT_RUNTIME_CONFIG
     if DEFAULT_RUNTIME_CONFIG is None:
