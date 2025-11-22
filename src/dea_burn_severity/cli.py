@@ -7,11 +7,8 @@ severity analytics and CLI entry points live in dedicated modules.
 
 from __future__ import annotations
 
-import json
 import os
 import re
-import shutil
-import tempfile
 import traceback
 from datetime import datetime, timedelta
 from typing import Any, Iterable
@@ -22,12 +19,10 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import xarray as xr
-from datacube.utils.cog import write_cog
 from datacube.utils.geometry import CRS, Geometry
-from shapely.geometry import shape
 
 from dea_tools.bandindices import calculate_indices
-from dea_tools.datahandling import load_ard
+from datacube.utils.cog import write_cog
 from dea_tools.spatial import xr_vectorize
 
 from .configuration import (
@@ -36,10 +31,16 @@ from .configuration import (
     build_runtime_config,
     get_default_runtime_config,
 )
+from .data_loading import load_ard_with_fallback, load_baseline_stack
+from .database import load_and_prepare_polygons
+from .logging_utils import append_log
+from .result_io import (
+    is_valid_geojson,
+    parse_s3_uri,
+    s3_key_exists_and_nonempty,
+    upload_dir_to_s3_and_cleanup,
+)
 from .severity import calculate_severity, create_debug_mask
-
-
-LOAD_DASK_CHUNKS: dict[str, int] = {"x": 2048, "y": 2048}
 
 ATTRIBUTE_COPY_RULES: tuple[dict[str, Any], ...] = (
     {"target": "fire_id", "sources": ("fire_id",), "date": False},
@@ -81,8 +82,6 @@ FIRE_NAME_FIELDS: tuple[str, ...] = ("fire_name",)
 FIRE_ID_FIELDS: tuple[str, ...] = ("fire_id",)
 IGNITION_DATE_FIELDS: tuple[str, ...] = ("ignition_date", "ignition_d")
 EXTINGUISH_DATE_FIELDS: tuple[str, ...] = ("extinguish_date", "date_retrieved", "date_retri")
-
-DB_SCHEMA = "public"
 
 
 # =============================
@@ -162,32 +161,6 @@ def _build_vector_filename(
     return _format_results_filename(identifier_src, processed_date_src, fallback_slug)
 
 
-def _select_reference_band(dataset: xr.Dataset) -> str:
-    preferred = ("nbart_green", "nbart_red", "nbart_nir_1", "nbart_blue")
-    for candidate in preferred:
-        if candidate in dataset.data_vars:
-            return candidate
-    for name, data in dataset.data_vars.items():
-        if "time" in data.dims:
-            return name
-    raise ValueError("Dataset lacks a data variable with a 'time' dimension.")
-
-
-def find_latest_valid_pixel(dataset: xr.Dataset) -> xr.Dataset:
-    if "time" not in dataset.dims:
-        raise ValueError("Dataset must include a 'time' dimension.")
-    ref_band = _select_reference_band(dataset)
-    time_numeric = xr.DataArray(
-        dataset["time"].astype("datetime64[ns]").astype(np.int64), dims="time"
-    )
-    valid_mask = dataset[ref_band].notnull()
-    valid_times = valid_mask * time_numeric
-    latest_time = valid_times.max(dim="time")
-    latest_mask = valid_times == latest_time
-    latest_values = dataset.where(latest_mask).max(dim="time")
-    return latest_values
-
-
 def _extract_attribute_values(series: pd.Series) -> dict[str, Any]:
     attributes: dict[str, Any] = {}
     for rule in ATTRIBUTE_COPY_RULES:
@@ -202,306 +175,6 @@ def _extract_attribute_values(series: pd.Series) -> dict[str, Any]:
         else:
             attributes[rule["target"]] = raw_value
     return attributes
-
-def _read_geojson_maybe_s3(path: str) -> gpd.GeoDataFrame:
-    """
-    Read a GeoJSON from a local path or S3 URI into a GeoDataFrame.
-    For S3, streams to a temporary local file (requires s3fs).
-    """
-    if isinstance(path, str) and path.lower().startswith("s3://"):
-        try:
-            import s3fs  # type: ignore
-        except Exception as exc:
-            raise RuntimeError(
-                "Reading from s3:// requires the 's3fs' package. "
-                "Install with: pip install s3fs"
-            ) from exc
-
-        gdf = None
-        errs: list[str] = []
-        for anon in (True, False):
-            try:
-                fs = s3fs.S3FileSystem(anon=anon)
-                with fs.open(path, "rb") as fsrc, tempfile.NamedTemporaryFile(
-                    suffix=".geojson", delete=False
-                ) as tmp:
-                    shutil.copyfileobj(fsrc, tmp)
-                    tmp_path = tmp.name
-                gdf = gpd.read_file(tmp_path)
-                os.remove(tmp_path)
-                break
-            except Exception as inner_exc:
-                errs.append(str(inner_exc))
-                gdf = None
-        if gdf is None:
-            raise RuntimeError(
-                f"Failed to read GeoJSON from S3 path '{path}'. Errors: {errs}"
-            )
-        return gdf
-    return gpd.read_file(path)
-
-
-def _load_polygons_from_database(config: RuntimeConfig) -> gpd.GeoDataFrame:
-    """
-    Load polygons directly from the configured PostgreSQL/PostGIS table.
-    """
-    if not config.db_table:
-        raise ValueError("Configuration 'db_table' must be provided for database polygon loading.")
-    if not config.db_columns:
-        raise ValueError("Configuration 'db_columns' must include at least one attribute column.")
-
-    try:
-        import psycopg2  # type: ignore
-        from psycopg2 import sql  # type: ignore
-    except ImportError as exc:  # pragma: no cover - optional dependency
-        raise RuntimeError(
-            "Database polygon loading requires the 'psycopg2-binary' package. "
-            "Install with: pip install psycopg2-binary"
-        ) from exc
-
-    conn = psycopg2.connect(
-        host=config.db_host,
-        dbname=config.db_name,
-        port=str(config.db_port),
-        user=config.db_user,
-        password=config.db_password,
-    )
-
-    table_identifier = (
-        sql.Identifier(DB_SCHEMA, config.db_table)
-        if DB_SCHEMA
-        else sql.Identifier(config.db_table)
-    )
-    select_clause = sql.SQL(", ").join(sql.Identifier(col) for col in config.db_columns)
-    query = sql.SQL(
-        "SELECT {fields}, ST_AsGeoJSON({geom}) AS geom_geojson FROM {table}"
-    ).format(
-        fields=select_clause,
-        geom=sql.Identifier(config.db_geom_column),
-        table=table_identifier,
-    )
-
-    print(
-        f"Querying polygons from table '{DB_SCHEMA + '.' if DB_SCHEMA else ''}{config.db_table}'..."
-    )
-    records: list[dict[str, Any]] = []
-    failures = 0
-
-    try:
-        with conn, conn.cursor() as cur:
-            cur.execute(query)
-            rows = cur.fetchall()
-            print(f"Retrieved {len(rows)} rows from database.")
-            for idx, row in enumerate(rows):
-                attr_values = row[:-1]
-                geom_raw = row[-1]
-                try:
-                    json_start = geom_raw.find("{")
-                    geom_str = geom_raw[json_start:] if json_start >= 0 else geom_raw
-                    geom_mapping = json.loads(geom_str)
-                    geom_obj = shape(geom_mapping)
-                except Exception as exc:
-                    failures += 1
-                    print(f"Warning: Failed to parse geometry for row {idx}: {exc}")
-                    continue
-
-                record = {col: val for col, val in zip(config.db_columns, attr_values)}
-                record["geometry"] = geom_obj
-                records.append(record)
-    finally:
-        conn.close()
-
-    if failures:
-        print(f"Skipped {failures} rows due to geometry parsing errors.")
-    if not records:
-        return gpd.GeoDataFrame(
-            columns=[*config.db_columns, "geometry"], crs=config.db_output_crs
-        )
-
-    return gpd.GeoDataFrame(records, crs=config.db_output_crs)
-
-
-def load_and_prepare_polygons(config: RuntimeConfig) -> gpd.GeoDataFrame | None:
-    """
-    Loads fire polygons from the configured database and prepares them for processing.
-    Dissolves by 'fire_id' if available to ensure one row per fire.
-    """
-    try:
-        poly_gdf = _load_polygons_from_database(config)
-    except Exception as exc:
-        print(f"Error: Failed loading polygons from database: {exc}")
-        return None
-
-    try:
-        if len(poly_gdf) > 1 and "fire_id" in poly_gdf.columns:
-            print("Dissolving polygons by 'fire_id'...")
-            poly_gdf = poly_gdf.dissolve(by="fire_id", aggfunc="first")
-        elif "fire_id" not in poly_gdf.columns:
-            print("Warning: 'fire_id' not in columns. Skipping dissolve.")
-    except TypeError as exc:
-        print(f"Warning: Could not dissolve polygon ({exc}). Continuing with loaded data.")
-
-    if "fire_id" not in poly_gdf.columns:
-        poly_gdf["fire_id"] = list(poly_gdf.index)
-
-    return poly_gdf
-
-
-def load_ard_with_fallback(
-    dc: datacube.Datacube,
-    gpgon: Geometry,
-    time: tuple[str, str],
-    config: RuntimeConfig,
-    min_gooddata_thresholds: Iterable[float] = (0.99, 0.90),
-    **kwargs,
-) -> xr.Dataset:
-    """
-    Loads ARD data, trying a list of 'min_gooddata' thresholds in order.
-    """
-    base_params = {
-        "dc": dc,
-        "products": config.s2_products,
-        "geopolygon": gpgon,
-        "time": time,
-        "measurements": config.s2_measurements,
-        "output_crs": config.output_crs,
-        "resolution": config.resolution,
-        "group_by": "solar_day",
-        "cloud_mask": "s2cloudless",
-        "dask_chunks": LOAD_DASK_CHUNKS,
-        **kwargs,
-    }
-
-    data = xr.Dataset()
-    for threshold in min_gooddata_thresholds:
-        print(f"Attempting load_ard with min_gooddata={threshold} ...")
-        base_params["min_gooddata"] = threshold
-        data = load_ard(**base_params)
-        if getattr(data, "time", xr.DataArray()).size > 0:
-            print(f"Success: Loaded {data.time.size} time slices.")
-            return data
-
-    print(
-        f"Warning: No data found for time range {time} "
-        f"even with min_gooddata={list(min_gooddata_thresholds)[-1]}"
-    )
-    return data
-
-
-def load_baseline_stack(
-    dc: datacube.Datacube, gpgon: Geometry, time: tuple[str, str], config: RuntimeConfig
-) -> tuple[xr.Dataset, xr.Dataset | None]:
-    """
-    Load baseline ARD with strict cloud limits, then fall back to a relaxed
-    load that is composited to the latest valid pixel if required.
-    """
-    base_params = {
-        "dc": dc,
-        "products": config.s2_products,
-        "geopolygon": gpgon,
-        "time": time,
-        "measurements": config.s2_measurements,
-        "output_crs": config.output_crs,
-        "resolution": config.resolution,
-        "group_by": "solar_day",
-        "cloud_mask": "s2cloudless",
-        "dask_chunks": LOAD_DASK_CHUNKS,
-        "min_gooddata": 0.99,
-    }
-
-    baseline = load_ard(**base_params)
-    if baseline.time.size > 0: # we find the good data
-        return baseline, baseline.isel(time=-1)
-
-    print("Baseline load empty; retrying with mask dilation and relaxed clouds.")
-    relaxed_params = base_params | {
-        "mask_filters": [("dilation", 15)],
-        "min_gooddata": 0.20,
-    }
-    # we change the QC request and do again
-    baseline = load_ard(**relaxed_params)
-
-    # if no data again, return empty
-    if baseline.time.size == 0:
-        return baseline, None
-
-    # return the new QC data, but also a composite of latest valid pixels
-    composite = find_latest_valid_pixel(baseline)
-    return baseline, composite
-
-
-def _append_log(log_path: str, line: str) -> None:
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    with open(log_path, "a", encoding="utf-8") as file:
-        file.write(line.rstrip("\n") + "\n")
-        file.flush()
-        os.fsync(file.fileno())
-
-
-def _parse_s3_uri(s3_uri: str) -> tuple[str, str]:
-    if not s3_uri.lower().startswith("s3://"):
-        raise ValueError(f"Not an S3 URI: {s3_uri}")
-    no_scheme = s3_uri[5:]
-    bucket, _, key = no_scheme.partition("/")
-    return bucket, key.rstrip("/")
-
-
-def _s3_key_exists_and_nonempty(fs, bucket: str, key: str) -> bool:
-    s3_path = f"{bucket}/{key}"
-    try:
-        if fs.exists(s3_path):
-            info = fs.info(s3_path)
-            return info.get("Size", 0) > 0
-        return False
-    except Exception:
-        return False
-
-
-def _upload_dir_to_s3_and_cleanup(local_dir: str, s3_prefix: str) -> bool:
-    """
-    Upload local_dir recursively into the supplied S3 prefix and, on success,
-    delete local_dir. All files land directly under the configured prefix, so
-    there is a single folder on S3 for every fire's artefacts.
-    """
-    if not os.path.isdir(local_dir):
-        print(f"[S3 upload] Local directory does not exist: {local_dir}")
-        return False
-
-    import s3fs  # type: ignore
-
-    bucket, key_prefix = _parse_s3_uri(s3_prefix)
-    dest_dir_key = key_prefix.strip("/")
-
-    fs = s3fs.S3FileSystem(anon=False)
-
-    local_files: list[tuple[str, int, str]] = []
-    for root, _, files in os.walk(local_dir):
-        for name in files:
-            full = os.path.join(root, name)
-            rel = os.path.relpath(full, local_dir).replace("\\", "/")
-            size = os.path.getsize(full)
-            local_files.append((rel, size, full))
-
-    if not local_files:
-        print(f"[S3 upload] Nothing to upload from {local_dir}")
-        return False
-
-    if dest_dir_key:
-        target_display = f"s3://{bucket}/{dest_dir_key}/"
-    else:
-        target_display = f"s3://{bucket}/"
-
-    print(f"[S3 upload] Uploading '{local_dir}' -> '{target_display}' ...")
-    for rel, _, full in local_files:
-        if dest_dir_key:
-            remote_key = f"{dest_dir_key}/{rel}"
-        else:
-            remote_key = rel
-        fs.put(full, f"{bucket}/{remote_key}")
-
-    shutil.rmtree(local_dir, ignore_errors=True)
-    return True
-
 
 def process_single_fire(
     fire_series: pd.Series,
@@ -571,7 +244,7 @@ def process_single_fire(
     )
     if closest_bl is None:
         if log_path:
-            _append_log(
+            append_log(
                 log_path,
                 f"{fire_display_name}\tbaseline_scenes=0\tpost_scenes=0\tgrid=0x0"
                 "\ttotal_px=0\tvalid_px=0\tburn_px=0\tmasked_px=0",
@@ -596,7 +269,7 @@ def process_single_fire(
                 if "oa_nbart_contiguity" in closest_bl.data_vars
                 else 0
             )
-            _append_log(
+            append_log(
                 log_path,
                 f"{fire_display_name}\tbaseline_scenes={baseline.time.size}\tpost_scenes=0"
                 f"\tgrid={yy}x{xx}\ttotal_px={total_px}\tvalid_px_baseline={bl_valid_px}"
@@ -619,7 +292,7 @@ def process_single_fire(
             yy = int(closest_bl.sizes.get("y", 0))
             xx = int(closest_bl.sizes.get("x", 0))
             total_px = yy * xx
-            _append_log(
+            append_log(
                 log_path,
                 f"{fire_display_name}\tbaseline_scenes={baseline.time.size}"
                 f"\tpost_scenes={post.time.size}\tgrid={yy}x{xx}"
@@ -680,7 +353,7 @@ def process_single_fire(
         post_valid_px_any = 0
 
     if log_path:
-        _append_log(
+        append_log(
             log_path,
             (
                 f"{fire_display_name}"
@@ -748,19 +421,6 @@ def process_single_fire(
     return aggregated
 
 
-def _is_valid_geojson(path: str) -> bool:
-    """
-    Check if a GeoJSON exists, is non-empty, and has severity column.
-    """
-    try:
-        if not os.path.exists(path) or os.path.getsize(path) == 0:
-            return False
-        gdf = gpd.read_file(path)
-        return (len(gdf) > 0) and ("severity" in gdf.columns)
-    except Exception:
-        return False
-
-
 def main(config: RuntimeConfig | None = None) -> None:
     """
     Entry point for processing burn severity polygons.
@@ -822,11 +482,11 @@ def main(config: RuntimeConfig | None = None) -> None:
         log_path = os.path.join(fire_dir, f"{base_fire_slug}_processing.log")
 
         if not os.path.exists(log_path):
-            _append_log(
+            append_log(
                 log_path,
                 f"# Processing log for {base_fire_name} (feature index {idx})",
             )
-            _append_log(
+            append_log(
                 log_path,
                 "# fire_name\tbaseline_scenes\tpost_scenes\tgrid\ttotal_px\tvalid_px"
                 "\tburn_px\tmasked_px\tvalid_px_baseline\tvalid_px_post_any",
@@ -834,20 +494,20 @@ def main(config: RuntimeConfig | None = None) -> None:
 
         skip_due_to_output = False
         if not runtime.force_rebuild:
-            if _is_valid_geojson(final_vector_path):
+            if is_valid_geojson(final_vector_path):
                 print(
                     f"[Fire '{base_fire_name}' ({fire_id_for_save})] Local output exists & valid. Skipping."
                 )
                 fire_skip += 1
                 skip_due_to_output = True
             elif upload_to_s3 and s3_fs is not None:
-                bucket, prefix = _parse_s3_uri(s3_prefix)
+                bucket, prefix = parse_s3_uri(s3_prefix)
                 prefix = prefix.strip("/")
                 prefix_part = f"{prefix}/" if prefix else ""
                 remote_key = (
                     f"{prefix_part}results/{vector_filename}"
                 )
-                if _s3_key_exists_and_nonempty(s3_fs, bucket, remote_key):
+                if s3_key_exists_and_nonempty(s3_fs, bucket, remote_key):
                     print(
                         f"[Fire '{base_fire_name}' ({fire_id_for_save})] Output exists in S3. Skipping."
                     )
@@ -880,7 +540,7 @@ def main(config: RuntimeConfig | None = None) -> None:
             continue
 
         if upload_to_s3:
-            ok = _upload_dir_to_s3_and_cleanup(fire_dir, s3_prefix)
+            ok = upload_dir_to_s3_and_cleanup(fire_dir, s3_prefix)
             if not ok:
                 print(
                     f"[S3 upload] WARNING: '{fire_dir}' was not removed (upload verification failed)."
