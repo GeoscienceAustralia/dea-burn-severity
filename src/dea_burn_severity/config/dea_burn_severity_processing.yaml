@@ -1,9 +1,8 @@
-polygons: s3://dea-public-data-dev/projects/burn_cube/derivative/dea_burn_severity/polygon_set/10k_sampled_fires.geojson
 output_dir: products
 force_rebuild: false
 upload_to_s3: true
 upload_to_s3_prefix: s3://dea-public-data-dev/projects/burn_cube/derivative/dea_burn_severity/result
-app_name: Burnt_Area_Mapping
+app_name: Burn_Severity
 output_crs: EPSG:3577
 resolution:
   - -10
