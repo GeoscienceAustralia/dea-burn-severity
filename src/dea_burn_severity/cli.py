@@ -136,6 +136,32 @@ def clean_fire_slug(name: str | None) -> str:
     return cleaned
 
 
+def _format_results_filename(
+    identifier_source: Any | None, date_source: Any | None, fallback_slug: str
+) -> tuple[str, str]:
+    """Return file-friendly identifier/date tuple for DEA outputs."""
+    identifier = clean_fire_slug(str(identifier_source).strip()) if identifier_source not in (None, "") else ""
+    if not identifier:
+        identifier = fallback_slug
+    date_value = process_date(date_source)
+    if not date_value:
+        date_value = datetime.utcnow().strftime("%Y-%m-%d")
+    fire_id_for_save = f"{identifier}_{date_value}"
+    return fire_id_for_save, f"DEA_burn_severity_{fire_id_for_save}.json"
+
+
+def _build_vector_filename(
+    fire_series: pd.Series, attributes: dict[str, Any], fallback_slug: str
+) -> tuple[str, str]:
+    identifier_src = attributes.get("fire_id")
+    if identifier_src in (None, ""):
+        identifier_src = _first_valid_value(fire_series, FIRE_ID_FIELDS)
+    processed_date_src = attributes.get("date_processed")
+    if processed_date_src in (None, ""):
+        processed_date_src = _first_valid_value(fire_series, ("date_processed", "date_proce"))
+    return _format_results_filename(identifier_src, processed_date_src, fallback_slug)
+
+
 def _select_reference_band(dataset: xr.Dataset) -> str:
     preferred = ("nbart_green", "nbart_red", "nbart_nir_1", "nbart_blue")
     for candidate in preferred:
@@ -680,6 +706,9 @@ def process_single_fire(
     aggregated["fire_name"] = fire_name_value or fire_slug
     aggregated["ignition_date"] = fire_date
     aggregated["extinguish_date"] = extinguish_date
+    fire_id_for_save, vector_filename = _build_vector_filename(
+        fire_series=fire_series, attributes=attributes, fallback_slug=fire_slug
+    )
 
     for key, value in attributes.items():
         if key in {"fire_id", "fire_name", "ignition_date", "extinguish_date"}:
@@ -688,10 +717,13 @@ def process_single_fire(
 
     base_dir = out_dir if out_dir else config.output_dir
     os.makedirs(base_dir, exist_ok=True)
+    results_dir = os.path.join(base_dir, "results")
+    os.makedirs(results_dir, exist_ok=True)
 
-    out_vec = os.path.join(base_dir, f"burn_severity_polygons_{fire_slug}.geojson")
+    # This matches the required DEA_burn_severity_<fire_id>_<date>.json naming.
+    out_vec = os.path.join(results_dir, vector_filename)
     aggregated.to_file(out_vec, driver="GeoJSON")
-    print(f"Saved per-fire severity GeoJSON: {out_vec}")
+    print(f"Saved per-fire severity GeoJSON ({fire_id_for_save}): {out_vec}")
 
     out_cog_preview = os.path.join(base_dir, f"s2_postfire_preview_{fire_slug}.tif")
     write_cog(post.isel(time=0).to_array().compute(), fname=out_cog_preview, overwrite=True)
@@ -771,9 +803,11 @@ def main(config: RuntimeConfig | None = None) -> None:
         fire_dir = os.path.join(runtime.output_dir, base_fire_slug)
         os.makedirs(fire_dir, exist_ok=True)
 
-        final_vector_path = os.path.join(
-            fire_dir, f"burn_severity_polygons_{base_fire_slug}.geojson"
+        fire_id_for_save, vector_filename = _build_vector_filename(
+            fire_series=fire_series, attributes=fire_attrs, fallback_slug=base_fire_slug
         )
+        results_dir = os.path.join(fire_dir, "results")
+        final_vector_path = os.path.join(results_dir, vector_filename)
         log_path = os.path.join(fire_dir, f"{base_fire_slug}_processing.log")
 
         if not os.path.exists(log_path):
@@ -790,17 +824,20 @@ def main(config: RuntimeConfig | None = None) -> None:
         skip_due_to_output = False
         if not runtime.force_rebuild:
             if _is_valid_geojson(final_vector_path):
-                print(f"[Fire '{base_fire_name}'] Local output exists & valid. Skipping.")
+                print(
+                    f"[Fire '{base_fire_name}' ({fire_id_for_save})] Local output exists & valid. Skipping."
+                )
                 fire_skip += 1
                 skip_due_to_output = True
             elif upload_to_s3 and s3_fs is not None:
                 bucket, prefix = _parse_s3_uri(s3_prefix)
                 remote_key = (
-                    f"{prefix}/{base_fire_slug}/"
-                    f"burn_severity_polygons_{base_fire_slug}.geojson"
+                    f"{prefix}/{base_fire_slug}/results/{vector_filename}"
                 )
                 if _s3_key_exists_and_nonempty(s3_fs, bucket, remote_key):
-                    print(f"[Fire '{base_fire_name}'] Output exists in S3. Skipping.")
+                    print(
+                        f"[Fire '{base_fire_name}' ({fire_id_for_save})] Output exists in S3. Skipping."
+                    )
                     fire_skip += 1
                     skip_due_to_output = True
 
