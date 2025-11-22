@@ -18,24 +18,22 @@ def calculate_severity(
     """
     print("Calculating severity based on landcover...")
 
-    grass_mask = landcover.level4.isin(grass_classes)
+    nbr = delta_nbr["NBR"] if isinstance(delta_nbr, xr.Dataset) else delta_nbr
 
-    severity_woody = xr.zeros_like(delta_nbr.NBR, dtype=np.uint8)
-    severity_woody = xr.where(delta_nbr.NBR >= 0.10, 2, severity_woody)
-    severity_woody = xr.where(delta_nbr.NBR >= 0.27, 3, severity_woody)
-    severity_woody = xr.where(delta_nbr.NBR >= 0.44, 4, severity_woody)
-    severity_woody = xr.where(delta_nbr.NBR >= 0.66, 5, severity_woody)
-    severity_woody = severity_woody.where(grass_mask == 0, 0)
+    # Mirror the previous behaviour where grass pixels carried a value of 2.
+    grass_mask = landcover.level4.isin(grass_classes).astype(np.uint8) * 2
+    woody_mask = grass_mask == 0
 
-    severity_grass = xr.zeros_like(delta_nbr.NBR, dtype=np.uint8)
-    severity_grass = xr.where(delta_nbr.NBR >= 0.08, 2, severity_grass)
-    severity_grass = xr.where(delta_nbr.NBR >= 0.20, 3, severity_grass)
-    severity_grass = xr.where(delta_nbr.NBR >= 0.34, 4, severity_grass)
-    severity_grass = xr.where(delta_nbr.NBR >= 0.45, 5, severity_grass)
-    severity_grass = severity_grass.where(grass_mask == 1, 0)
+    low = (nbr >= 0.1).astype(np.uint8) * 2
+    medium = (nbr >= 0.27).astype(np.uint8)
+    high = (nbr >= 0.44).astype(np.uint8)
+    very_high = (nbr >= 0.66).astype(np.uint8)
+
+    severity_woody = (low + medium + high + very_high).where(woody_mask, 0)
+    severity_grass = grass_mask.where(nbr >= 0.1, 0)
 
     severity = severity_woody + severity_grass
-    severity = xr.where(severity == 0, 1, severity)
+
     severity.name = "severity"
     return severity
 
