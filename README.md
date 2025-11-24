@@ -60,6 +60,8 @@ db_geom_column: geom
 ```
 
 ## How the pipeline runs (per fire) 🧭
+![Burn severity flow diagram](burn_severity_flow.png)
+
 1. **Polygon ingest**: Load GeoDataFrame from Postgres, dissolve by `fire_id` when present; ensure `fire_id` exists for downstream naming.
 2. **Date wiring**: Derive `ignition_date` (or fallback capture date) and `extinguish_date`. Compute pre/post windows from config.
 3. **Baseline stack**: Call `load_ard` with `min_gooddata=0.99`; if empty, retry with mask dilation + `min_gooddata=0.20` and build a latest‑valid composite.
