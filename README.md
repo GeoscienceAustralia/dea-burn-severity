@@ -1,89 +1,103 @@
-# dea-burn-severity
+# dea-burn-severity 🔥🛰️🌿
 
-CLI wrapper for the DEA burn severity classification workflow.
+Fully automated burn-severity workflow for Digital Earth Australia. This CLI pulls fire footprints from Postgres, loads Sentinel‑2 ARD, computes delta NBR with landcover-aware thresholds, vectorises severity classes, and optionally ships results to S3—idempotently and with rich QA logging.
 
-## Installation
+## What this tool delivers
+- 🛰️ **Data ingest**: Sentinel‑2 ARD (`ga_s2am_ard_3`, `ga_s2bm_ard_3`, `ga_s2cm_ard_3`) with S2 Cloudless masking, loaded via `dea_tools.load_ard`.
+- 🧭 **Temporal windows**: Configurable pre/post windows (defaults: `pre_fire_buffer_days=50`, `post_fire_start_days=15`, `post_fire_window_days=60`) tuned for burn assessments.
+- 🌿 **Landcover-aware severity**: Delta NBR against `ga_ls_landcover_class_cyear_3`, with grass-class thresholds defined in `grass_classes`.
+- 🧪 **Quality signals**: Cloud/contiguity/water masking, pixel counts, and per-fire logs for fast QA.
+- 🧩 **Geo outputs**: Severity polygons dissolved by class, plus preview/debug COGs. Ready for downstream GIS or dashboards.
+- 🚛 **Distribution**: Local outputs under `products/` by default, optional S3 upload + local cleanup when `upload_to_s3` is enabled.
 
-Install directly from source (editable mode recommended while developing):
-
+## Quick start
 ```bash
-pip install -e .
+# 1) Install
+pip install -e .  # editable makes iteration easy; requires dea_tools + datacube deps
+
+# 2) Set DB credentials (env var names are fixed)
+export FIRE_DB_HOSTNAME=...
+export FIRE_DB_NAME=...
+export FIRE_DB_USERNAME=...
+export FIRE_DB_PASSWORD=...
+export DB_PORT=5432
+
+# 3) Run with defaults (uses packaged YAML)
+dea-burn-severity
+
+# 4) Or point at your own config
+dea-burn-severity --config /path/to/dea_burn_severity_processing.yaml
 ```
+Tip: `DEA_BURN_SEVERITY_*` env vars mirror CLI flags (e.g. `DEA_BURN_SEVERITY_OUTPUT_DIR`), since Click’s `auto_envvar_prefix` is set.
 
-Ensure `dea_tools` is installed or otherwise available on the Python path; the CLI
-expects to import it directly from the environment.
+## Inputs & prerequisites
+- ✅ Postgres/PostGIS table containing fire footprints; geometry is read via `ST_AsGeoJSON`.
+- ✅ DB creds from env: `FIRE_DB_HOSTNAME`, `FIRE_DB_NAME`, `FIRE_DB_USERNAME`, `FIRE_DB_PASSWORD`, `DB_PORT` (defaults to 5432).
+- ✅ Optional S3 credentials if uploading outputs.
+- ✅ Datacube configured with Sentinel‑2 ARD + landcover products; `dea_tools` available on the Python path.
+- ✅ `psycopg2-binary` installed when using DB loading (the CLI does not vendor it).
 
-## Usage
+## Configuration (YAML + CLI + env)
+- 📦 **Packaged defaults**: `src/dea_burn_severity/config/dea_burn_severity_processing.yaml` mirrors the legacy shipped YAML.
+- 🔄 **Merge order**: defaults → optional YAML (`--config` local/http(s)/s3) → CLI flags → `DEA_BURN_SEVERITY_*` env for those flags. DB creds always come from the fixed env var names above.
+- 🔑 **Key fields** (see `config/dea_burn_severity_processing.yaml` for all):
+  - `output_dir`: base folder (`products` by default).
+  - `s2_products`, `s2_measurements`: Sentinel‑2 collections + bands (passed as lists when calling `load_ard`).
+  - `output_crs`, `resolution`: reprojection and pixel size (default EPSG:3577, -10/10 m).
+  - `pre_fire_buffer_days`, `post_fire_start_days`, `post_fire_window_days`: temporal windows.
+  - `grass_classes`: landcover codes treated as grass; determines thresholds.
+  - `db_table`, `db_columns`, `db_geom_column`, `db_output_crs`: how footprints are read and reprojected.
+  - `upload_to_s3`, `upload_to_s3_prefix`: enable S3 publishing + cleanup of local run dirs.
 
-```bash
-dea-burn-severity \
-  --config https://example.com/dea_burn_severity_processing.yaml \
-  --save-per-part-vectors false
-```
-
-Run `dea-burn-severity --help` to inspect all options.
-
-## Processing Overview
-
-- 🔄 **Config merge**: Baked-in defaults (mirroring the former packaged YAML) are merged with any external YAML and CLI flags, wiring options like `output_dir`, `resolution`, acquisition windows, and S3 upload behaviour.
-- 🗺️ **Polygon prep**: Fire footprints are read directly from the configured Postgres table, dissolved to one row per `fire_id` if available, and assumed to be single polygons (no explode/merge stage required).
-- 🛰️ **Baseline vs post-fire stacks**: For each fire polygon the CLI instantiates a `datacube.Datacube`, first attempts a pristine (99% clear) Sentinel-2 baseline, then falls back to a dilated-cloud composite that picks the latest valid pixel if necessary; post-fire loads retain the looser `min_gooddata` behaviour.
-- 🌿 **Landcover-aware severity**: Landcover tiles (`ga_ls_landcover_class_cyear_3`) provide grass vs woody masks. The workflow computes delta NBR (`calculate_indices`) and applies class-specific thresholds to yield categorical severity rasters.
-- 🧪 **Quality masks & stats**: A composite debug mask flags water, cloud, and contiguity issues across the time series; per-fire logs capture pixel counts, valid baselines, and missing data to support QA.
-- 📝 **Metadata carry-through**: Output severity vectors inherit key fire metadata (ID, name, type, capture dates, agencies, etc.) using the same attribute mapping as the reference notebook, keeping downstream consumers aligned.
-- 🧩 **Vectorisation & exports**: Severity rasters are vectorised (`xr_vectorize`) to GeoJSON and optionally saved as Cloud-Optimised GeoTIFFs. Outputs can stay local or be uploaded to S3 (with graceful skipping when artefacts already exist).
-- ✅ **Idempotent execution**: Existing results are respected unless `--force-rebuild` is supplied, avoiding redundant reprocessing when rerunning the pipeline.
-
-## Configuration
-
-- **Defaults & overrides**: The CLI ships with sensible defaults compiled directly into the source. Provide a custom YAML file—local path, `http(s)://`
-URL, or `s3://` URI—via `--config` to override any value. CLI flags continue to override
-both the built-in and external configuration values. The YAML holds every CLI option
-(e.g. `output_dir`, S3 settings), so supplying an external config alone is often
-enough to run the pipeline. Boolean CLI overrides accept `true`/`false`.
-
-### Database polygon loading
-
-Fire footprints always come from Postgres. Configure the table/column metadata via `db_table`, `db_columns`, `db_geom_column`, and ensure the environment supplies credentials via the names in `db_host_env`, `db_name_env`, and `db_password_env` (defaults already point at the `fire_severity_product` instance). The reader uses `psycopg2-binary`, so install it alongside the CLI.
-
-Example YAML overrides (matching the sample row you shared):
-
+Minimal custom YAML example:
 ```yaml
+output_dir: /data/burns
+upload_to_s3: true
+upload_to_s3_prefix: s3://dea-public-data-dev/projects/burn_cube/derivative/dea_burn_severity/result
 db_table: nli_lastboundaries_trigger
-db_columns:
-  - fire_id
-  - fire_name
-  - fire_type
-  - ignition_date
-  - capt_date
-  - capt_method
-  - area_ha
-  - perim_km
-  - state
-  - agency
-  - date_retrieved
-  - date_processed
+db_columns: [fire_id, fire_name, ignition_date, capt_date, capt_method, state, agency, date_retrieved, date_processed]
 db_geom_column: geom
 ```
 
-With these settings the CLI expects rows like:
+## How the pipeline runs (per fire) 🧭
+1. **Polygon ingest**: Load GeoDataFrame from Postgres, dissolve by `fire_id` when present; ensure `fire_id` exists for downstream naming.
+2. **Date wiring**: Derive `ignition_date` (or fallback capture date) and `extinguish_date`. Compute pre/post windows from config.
+3. **Baseline stack**: Call `load_ard` with `min_gooddata=0.99`; if empty, retry with mask dilation + `min_gooddata=0.20` and build a latest‑valid composite.
+4. **Post-fire stack**: Call `load_ard_with_fallback` with decreasing `min_gooddata` thresholds (0.99 → 0.90 by default).
+5. **Landcover**: Load `ga_ls_landcover_class_cyear_3` for the year before ignition.
+6. **Indices**: Compute pre/post NBR via `calculate_indices`; derive delta NBR.
+7. **Severity classification**: Apply grass/woody thresholds (`calculate_severity`), generate debug mask (cloud/water/contiguity), and set masked pixels to class `6`.
+8. **Vectorisation**: Convert severity raster to vectors, clip to fire footprint, dissolve by class, and attach metadata (`fire_id`, `fire_name`, dates, plus all other attributes from `db_columns`).
+9. **Outputs**:
+   - GeoJSON: `products/results/DEA_burn_severity_<fire_id>_<date>.json`
+   - Preview COG: `products/s2_postfire_preview_<fire_slug>.tif` (first post-fire scene)
+   - Debug COG: `products/debug_mask_raster_<fire_slug>.tif`
+   - Optional run log: per-fire pixel counts, baseline/post scene counts, masked/valid stats.
+10. **Distribution**: If `upload_to_s3` is true, the per-fire folder is uploaded to `upload_to_s3_prefix` and removed locally after verification.
 
-| fire_id | fire_name | fire_type | ignition_date | capt_date | capt_method | area_ha | perim_km | state | agency | date_retrieved | date_processed |
-|---------|-----------|-----------|---------------|-----------|-------------|---------|----------|-------|--------|----------------|----------------|
-| `a518823f-bdea-4299-877b-7b44328d243d` | `None` | `None` | `2025-10-26 20:18:56` | `2025-10-26 21:28:18` | `FIREMAPPER` | `5625.38` | `29.78` | `QLD` | `Qld Fire and Emergency Services` | `2025-10-27 08:15:00` | `2025-11-03` |
+## CLI flags (all optional thanks to defaults)
+- `--config PATH|URL` — external YAML to merge.
+- `--output-dir PATH` — override base output folder.
+- `--force-rebuild true|false` — ignore existing outputs.
+- `--upload-to-s3 true|false` — toggle publishing + cleanup.
+- `--upload-to-s3-prefix s3://bucket/prefix` — target prefix.
+- `--app-name NAME` — datacube app name.
+- `--db-table NAME` — override table (columns come from YAML).
+Use `dea-burn-severity --help` for the live list; `DEA_BURN_SEVERITY_OUTPUT_DIR` etc. mirror these options.
 
-The geometry column is read via `ST_AsGeoJSON(geom)` and converted into the GeoDataFrame used by the pipeline.
+## Outputs & QA 📂
+- **GeoJSON**: severity polygons dissolved by class, CRS `EPSG:4283`.
+- **COGs**: one post-fire preview (first time slice) and one debug mask per fire.
+- **Logs**: When `log_path` is provided internally, each fire logs scene counts, grid size, valid/burn/masked pixel totals, and baseline/post contiguity stats.
+- **Idempotency**: Existing per-fire outputs are skipped unless `--force-rebuild` is set.
 
-## Docker
+## Development & troubleshooting 🛠️
+- Install: `pip install -e .` (ensure `dea_tools`, `datacube`, `psycopg2-binary`, GDAL stack available).
+- Docker: `docker build -t dea-burn-severity .` then `docker run --rm dea-burn-severity dea-burn-severity --help`.
+- Common hiccups:
+  - 🔑 Missing DB creds → set `FIRE_DB_*` env vars.
+  - 🌥️ No baseline scenes → falls back to relaxed composite; still skips if empty.
+  - 📦 Missing `dea_tools`/`datacube` imports → install into the same environment.
+  - 📡 S3 upload failures → outputs remain on disk for manual retry.
 
-Build the container image (uses requirements/constraints mirrored from dea-fmc):
-
-```bash
-docker build -t dea-burn-severity .
-```
-
-Run the CLI inside the container:
-
-```bash
-docker run --rm dea-burn-severity dea-burn-severity --help
-```
+Happy mapping! 🎉
