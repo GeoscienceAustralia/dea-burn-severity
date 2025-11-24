@@ -100,4 +100,9 @@ Use `dea-burn-severity --help` for the live list; `DEA_BURN_SEVERITY_OUTPUT_DIR`
   - 📦 Missing `dea_tools`/`datacube` imports → install into the same environment.
   - 📡 S3 upload failures → outputs remain on disk for manual retry.
 
+## Testing ✅
+- Install dev extras: `pip install -e .[test]`
+- Run locally: `pytest`
+- Docker build and CI run the same suite during image builds.
+
 Happy mapping! 🎉

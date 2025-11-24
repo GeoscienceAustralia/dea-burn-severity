@@ -2,7 +2,8 @@ FROM osgeo/gdal:ubuntu-small-3.6.3
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LC_ALL=C.UTF-8 \
-    LANG=C.UTF-8
+    LANG=C.UTF-8 \
+    PIP_ROOT_USER_ACTION=ignore
 
 # System dependencies similar to dea-fmc base image
 RUN apt-get update && \
@@ -35,6 +36,9 @@ WORKDIR /code
 ADD . /code
 
 RUN echo "Installing dea-burn-severity through the Dockerfile."
-RUN python3 -m pip install --no-cache-dir --extra-index-url="https://packages.dea.ga.gov.au" .
+RUN python3 -m pip install --no-cache-dir --extra-index-url="https://packages.dea.ga.gov.au" -c /conf/constraints.txt ".[test]"
+
+RUN echo "Running unit tests."
+RUN python3 -m pytest tests
 
 RUN pip freeze && pip check

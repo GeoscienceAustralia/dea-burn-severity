@@ -18,7 +18,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 PACKAGE_CONFIG_PATH = PACKAGE_ROOT / "config" / "dea_burn_severity_processing.yaml"
 DEFAULT_CONFIG_URL = (
     "https://raw.githubusercontent.com/GeoscienceAustralia/dea-burn-severity/refs/heads/main/"
-    "src/dea_burn_severity/config/dea_burn_severity_processing.yaml"
+    "config/dea_burn_severity_processing.yaml"
 )
 
 CLI_CONFIG_KEYS = (
@@ -152,10 +152,6 @@ def load_default_config() -> dict[str, Any]:
     return copy.deepcopy(raw_config)
 
 
-DEFAULT_CONFIG_DICT = load_default_config()
-DEFAULT_RUNTIME_CONFIG: RuntimeConfig | None = None
-
-
 def _load_text_from_source(source: str | Path) -> str:
     """
     Load a text file from local disk, HTTP(S) or S3.
@@ -193,6 +189,10 @@ def load_yaml_config(source: str | Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("Configuration YAML must define a mapping at the top level.")
     return data
+
+
+DEFAULT_CONFIG_DICT = load_default_config()
+DEFAULT_RUNTIME_CONFIG: RuntimeConfig | None = None
 
 
 def merge_config(base: dict[str, Any], override: dict[str, Any] | None) -> dict[str, Any]:

@@ -91,8 +91,9 @@ def load_ard_with_fallback(
         print(f"Attempting load_ard with min_gooddata={threshold} ...")
         base_params["min_gooddata"] = threshold
         data = load_ard(**base_params)
-        if getattr(data, "time", xr.DataArray()).size > 0:
-            print(f"Success: Loaded {data.time.size} time slices.")
+        time_size = int(getattr(getattr(data, "time", None), "size", 0))
+        if time_size > 0:
+            print(f"Success: Loaded {time_size} time slices.")
             return data
 
     print(
@@ -124,7 +125,8 @@ def load_baseline_stack(
     }
 
     baseline = load_ard(**base_params)
-    if baseline.time.size > 0:
+    baseline_time_size = int(getattr(getattr(baseline, "time", None), "size", 0))
+    if baseline_time_size > 0:
         return baseline, baseline.isel(time=-1)
 
     print("Baseline load empty; retrying with mask dilation and relaxed clouds.")

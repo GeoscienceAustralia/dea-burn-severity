@@ -9,10 +9,12 @@ on:
       - main
     paths:
       - 'src/**'
+      - 'tests/**'
       - '!configs/*'
       - 'Dockerfile'
       - 'constraints.txt'
       - 'requirements.txt'
+      - 'pyproject.toml'
       - '.github/workflows/dea-burn-severity-image.yaml'
 
   release:
@@ -30,6 +32,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
+      - name: Run unit tests (Docker build executes pytest)
+        run: |
+          docker build -t dea-burn-severity:test --progress=plain .
+          docker rmi dea-burn-severity:test || true
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -37,10 +44,13 @@ jobs:
           audience: sts.amazonaws.com
           aws-region: ap-southeast-2
 
-      - name: Get tag for this build if it exists
-        if: github.event_name == 'release'
+      - name: Set default RELEASE tag if not set
         run: |
-          echo "RELEASE=${GITHUB_REF/refs\/tags\/}" >> $GITHUB_ENV
+          if [ -z "${GITHUB_REF##refs/tags/*}" ]; then
+            echo "RELEASE=${GITHUB_REF/refs\/tags\/}" >> $GITHUB_ENV
+          else
+            echo "RELEASE=latest" >> $GITHUB_ENV
+          fi
 
       - name: Push release image to ECR
         uses: whoan/docker-build-with-cache-action@master
