@@ -265,7 +265,7 @@ def process_single_fire(
             xx = int(closest_bl.sizes.get("x", 0))
             total_px = yy * xx
             bl_valid_px = (
-                int((closest_bl.oa_nbart_contiguity == 1).sum().item())
+                int((closest_bl.oa_nbart_contiguity == 1).sum().compute().item())
                 if "oa_nbart_contiguity" in closest_bl.data_vars
                 else 0
             )
