@@ -26,16 +26,13 @@ colour==0.1.5
 comm==0.2.2
 contourpy==1.3.1
 cycler==0.12.1
-dask==2024.12.1
-dask-expr==1.1.21
-dask-glm==0.3.2
-dask-image==2024.5.3
+dask-expr==1.1.15
+dask==2024.9.1
 dask-ml==2024.4.4
 decorator==5.1.1
 deepdiff==8.1.1
 defusedxml==0.7.1
 deprecat==2.1.3
-distributed==2024.12.1
 exceptiongroup==1.2.2
 executing==2.1.0
 Flask==3.0.3
@@ -50,7 +47,6 @@ geopy==2.4.1
 greenlet==3.1.1
 h3==4.1.2
 h5py==3.12.1
-hdstats==0.2.1
 idna==3.10
 imageio==2.36.1
 importlib_metadata==8.5.0
@@ -84,7 +80,6 @@ multipledispatch==1.0.0
 netCDF4==1.7.2
 networkx==3.4.2
 numba==0.60.0
-numexpr==2.10.2
 odc-ui==0.2.1
 orderly-set==5.2.3
 OWSLib==0.32.0
@@ -115,7 +110,6 @@ python-dateutil==2.9.0.post0
 python-dotenv==1.0.1
 python-rapidjson==1.20
 python-slugify==8.0.4
-pyTMD==2.1.6
 pytz==2024.2
 PyYAML==6.0.2
 rasterstats==0.20.0
@@ -143,7 +137,6 @@ tblib==3.0.0
 text-unidecode==1.3
 threadpoolctl==3.5.0
 tifffile==2025.1.10
-timescale==0.0.6
 timezonefinder==6.5.7
 tomli==2.2.1
 toolz==1.0.0
