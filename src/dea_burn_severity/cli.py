@@ -168,30 +168,15 @@ def clean_fire_slug(name: str | None) -> str:
     return cleaned
 
 
-def _format_results_filename(
-    identifier_source: Any | None, date_source: Any | None, fallback_slug: str
-) -> tuple[str, str]:
-    """Return file-friendly identifier/date tuple for DEA outputs."""
-    identifier = clean_fire_slug(str(identifier_source).strip()) if identifier_source not in (None, "") else ""
-    if not identifier:
-        identifier = fallback_slug
-    date_value = process_date(date_source)
-    if not date_value:
-        date_value = datetime.utcnow().strftime("%Y-%m-%d")
-    fire_id_for_save = f"{identifier}_{date_value}"
-    return fire_id_for_save, f"DEA_burn_severity_{fire_id_for_save}.json"
-
-
 def _build_vector_filename(
-    fire_series: pd.Series, attributes: dict[str, Any], fallback_slug: str
-) -> tuple[str, str]:
+    fire_series: pd.Series, attributes: dict[str, Any]) -> tuple[str, str]:
+        """Return file-friendly identifier/date tuple for DEA outputs."""
     identifier_src = attributes.get("fire_id")
     if identifier_src in (None, ""):
         identifier_src = _first_valid_value(fire_series, FIRE_ID_FIELDS)
-    processed_date_src = attributes.get("date_processed")
-    if processed_date_src in (None, ""):
-        processed_date_src = _first_valid_value(fire_series, ("date_processed", "date_proce"))
-    return _format_results_filename(identifier_src, processed_date_src, fallback_slug)
+    processed_date_src =  str(datetime.now()).strip()
+    fire_id_for_save = f"{identifier_src}_{processed_date_src}"
+    return fire_id_for_save, f"DEA_burn_severity_{fire_id_for_save}.geojson"
 
 
 def _extract_attribute_values(series: pd.Series) -> dict[str, Any]:
@@ -236,8 +221,7 @@ def process_single_fire(
 
     fire_id = attributes.get("fire_id")
     fire_name_value = attributes.get("fire_name")
-    # fire_slug = unique_fire_name
-    # fire_display_name = str(fire_name_value).strip() if fire_name_value else fire_slug
+
 
     fire_date = process_date(attributes.get("ignition_date"))
     if not fire_date:
@@ -291,7 +275,7 @@ def process_single_fire(
         gpgon,
         time=(start_date_post, end_date_post),
         config=config,
-        min_gooddata_thresholds=(0.90,),
+        min_gooddata_thresholds=(0.90,0.50),
     )
     if post.time.size == 0:
         if log_path:
@@ -445,7 +429,7 @@ def process_single_fire(
 
     
     fire_id_for_save, vector_filename = _build_vector_filename(
-        fire_series=fire_series, attributes=attributes, fallback_slug=fire_slug
+        fire_series=fire_series, attributes=attributes
     )
 
     base_dir = out_dir if out_dir else config.output_dir
@@ -453,20 +437,20 @@ def process_single_fire(
     results_dir = os.path.join(base_dir, "results")
     os.makedirs(results_dir, exist_ok=True)
 
-    # This matches the required DEA_burn_severity_<fire_id>_<date>.json naming.
+    # This matches the required DEA_burn_severity_<fire_id>_<date>.geojson naming.
     out_vec = os.path.join(results_dir, vector_filename)
     aggregated.to_file(out_vec, driver="GeoJSON")
     print(f"Saved per-fire severity GeoJSON ({fire_id_for_save}): {out_vec}")
 
-    out_cog_preview = os.path.join(base_dir, f"s2_postfire_preview_{fire_slug}.tif")
+    out_cog_preview = os.path.join(base_dir, f"s2_postfire_preview_{fire_id_for_save}.tif")
     write_cog(post.isel(time=0).to_array().compute(), fname=out_cog_preview, overwrite=True)
     print(f"Saved post-fire preview COG: {out_cog_preview}")
 
-    out_cog_debug = os.path.join(base_dir, f"debug_mask_raster_{fire_slug}.tif")
+    out_cog_debug = os.path.join(base_dir, f"debug_mask_raster_{fire_id_for_save}.tif")
     write_cog(debug_mask.compute(), fname=out_cog_debug, overwrite=True)
     print(f"Saved debug mask COG: {out_cog_debug}")
 
-    print(f"Successfully processed fire: {fire_display_name}")
+    print(f"Successfully processed fire: {fire_id_for_save}")
     return aggregated
 
 
@@ -524,11 +508,10 @@ def main(config: RuntimeConfig | None = None) -> None:
         os.makedirs(fire_dir, exist_ok=True)
 
         fire_id_for_save, vector_filename = _build_vector_filename(
-            fire_series=fire_series, attributes=fire_attrs, fallback_slug=base_fire_slug
-        )
+            fire_series=fire_series, attributes=fire_attrs)
         results_dir = os.path.join(fire_dir, "results")
         final_vector_path = os.path.join(results_dir, vector_filename)
-        log_path = os.path.join(fire_dir, f"{base_fire_slug}_processing.log")
+        log_path = os.path.join(fire_dir, f"{ base_fire_slug}_processing.log")
 
         if not os.path.exists(log_path):
             append_log(
