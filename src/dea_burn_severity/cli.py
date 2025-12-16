@@ -104,61 +104,28 @@ def _first_valid_value(series: pd.Series, keys: Iterable[str]) -> Any | None:
         return value
     return None
 
-def is_date_iso(value: str) -> bool:
-    """ checks to see if date string has desiered ios UTC format by trying to convert it to datetime object
-    returns TRUE if string is in correct format
-    returns FLASE if it is no :(
-    
-    """
-    try:
-        datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%S.%fZ")
-        return True
-    except (ValueError, TypeError):
-        return False
 
-
-def is_date_DEA_format(value: str) -> bool:
-    # test for YYYY-MM-DD format date:
-    try:
-        datetime.strptime(date_str, "%Y-%m-%d")
-        return True
-    except (ValueError, TypeError):
-        return False
+def _is_valid_date_string(value: str) -> bool:
+    return bool(re.match(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$", value))
 
 
 def process_date(value: Any) -> str | None:
-    """check the format for a date is as desiered 'yyyy-MM-ddTHH:mm:ss.sZ ', If it is not then format assuming it's 
-    a valid date either as YYYY-MM-DD, YYYYMMDD or YYYYMMDDhhmmss and format as above (assume the time is noon if no time is given)
-
-    otherwise return None. """
-    if pd.isna(date):  # Handles NaT and None
+    if value is None or (isinstance(value, float) and np.isnan(value)):
         return None
-    
-    elif type(date) == pd._libs.tslibs.timestamps.Timestamp:
-        date = date.to_pydatetime()
-        return date.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    if isinstance(value, (datetime, pd.Timestamp)):
+        return pd.to_datetime(value).strftime("%Y-%m-%d")
+    if isinstance(value, np.datetime64):
+        return pd.to_datetime(value).strftime("%Y-%m-%d")
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "nan", "null"}:
+        return None
+    if _is_valid_date_string(text):
+        return text
+    digits = re.sub(r"[^0-9]", "", text)
+    if len(digits) >= 8:
+        return f"{digits[0:4]}-{digits[4:6]}-{digits[6:8]}"
+    return None
 
-    elif isinstance(date, datetime):
-        return date.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-    elif is_date_iso(date) == True:
-        return date
-        
-    elif is_date_DEA_format(date) == True:
-        return f'{date}T12:00:00.0Z'
-        
-    elif bool(re.match(r'^\d+$', date)) == True:
-        if len(date) == 14:
-            return f'{date[0:4]}-{date[4:6]}-{date[6:8]}T{date[8:10]}:{date[10:12]}:{date[12:14]}.0Z'
-        else:
-            return f'{date[0:4]}-{date[4:6]}-{date[6:8]}T12:00:00.0Z'
-    else:
-        try:
-            as_date = datetime.strptime(date, "%Y%m%d%H%M%S.%f")
-            return as_date.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-            
-        except ValueError:
-            return
 
 def clean_fire_slug(name: str | None) -> str:
     if not name:
@@ -236,10 +203,10 @@ def process_single_fire(
 
     fire_id = attributes.get("fire_id")
     fire_name_value = attributes.get("fire_name")
-    # fire_slug = unique_fire_name
-    # fire_display_name = str(fire_name_value).strip() if fire_name_value else fire_slug
+    fire_slug = unique_fire_name
+    fire_display_name = str(fire_name_value).strip() if fire_name_value else fire_slug
 
-    fire_date = process_date(attributes.get("ignition_date"))
+    fire_date = attributes.get("ignition_date")
     if not fire_date:
         fallback_raw = _first_valid_value(fire_series, ("capt_date", "capture_date", "capture_da"))
         fire_date = process_date(fallback_raw)
@@ -248,23 +215,22 @@ def process_single_fire(
             f"Could not determine ignition date for fire '{fire_display_name}'."
         )
 
-    processed_date_value = process_date(attributes.get("date_processed"))
-    if processed_date_value:
-            extinguish_date = datetime.strftime(
-            ((datetime.strptime(assumed_extinguish_date, "%Y-%m-%dT%H:%M:%S.%fZ")) - timedelta(days=config.nli_holding_days)),
-            "%Y-%m-%dT%H:%M:%S.%fZ")
-    else:
-        extinguish_date = ( datetime.strptime(fire_date, "%Y-%m-%dT%H:%M:%S.%fZ") + 
-                           timedelta(days=config.post_fire_start_days)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    extinguish_date_value = attributes.get("date_retrieved") or attributes.get("extinguish_date")
+    extinguish_date = extinguish_date_value if extinguish_date_value else "None"
 
     start_date_pre = (
-        datetime.strptime(fire_date, "%Y-%m-%dT%H:%M:%S.%fZ") - timedelta(days=config.pre_fire_buffer_days)
+        datetime.strptime(fire_date, "%Y-%m-%d") - timedelta(days=config.pre_fire_buffer_days)
     ).strftime("%Y-%m-%d")
     end_date_pre = (
-        datetime.strptime(fire_date, "%Y-%m-%dT%H:%M:%S.%fZ") - timedelta(days=1)
+        datetime.strptime(fire_date, "%Y-%m-%d") - timedelta(days=1)
     ).strftime("%Y-%m-%d")
 
-    start_date_post = datetime.strptime(extinguish_date, "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%Y-%m-%d")
+    if extinguish_date == "None":
+        start_date_post = (
+            datetime.strptime(fire_date, "%Y-%m-%d") + timedelta(days=config.post_fire_start_days)
+        ).strftime("%Y-%m-%d")
+    else:
+        start_date_post = extinguish_date
 
     end_date_post = (
         datetime.strptime(start_date_post, "%Y-%m-%d")
@@ -421,19 +387,17 @@ def process_single_fire(
 
     if fire_id is not None:
         aggregated["fire_id"] = fire_id
-    aggregated["fire_name"] = fire_name_value
+    aggregated["fire_name"] = fire_name_value or fire_slug
     aggregated["ignition_date"] = fire_date
     aggregated["extinguish_date"] = extinguish_date
-    aggregated["fire_type"] = attribute.get("fire_type")
-    aggregated["capt_date"] = attribute.get("capt_date")
-    aggregated["capt_method"] = attribute.get("capt_method")
-    aggregated["state"] = attribute.get("state")
-    aggregated["agency"] = attribute.get("agency")
-
-    
     fire_id_for_save, vector_filename = _build_vector_filename(
         fire_series=fire_series, attributes=attributes, fallback_slug=fire_slug
     )
+
+    for key, value in attributes.items():
+        if key in {"fire_id", "fire_name", "ignition_date", "extinguish_date"}:
+            continue
+        aggregated[key] = value
 
     base_dir = out_dir if out_dir else config.output_dir
     os.makedirs(base_dir, exist_ok=True)
