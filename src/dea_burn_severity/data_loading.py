@@ -66,7 +66,7 @@ def load_ard_with_fallback(
     gpgon: Geometry,
     time: tuple[str, str],
     config: RuntimeConfig,
-    min_gooddata_thresholds: Iterable[float] = (0.99, 0.90),
+    min_gooddata_thresholds: Iterable[float] = (0.99, 0.90, 0.50),
     **kwargs,
 ) -> xr.Dataset:
     """
