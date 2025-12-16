@@ -132,7 +132,7 @@ def load_baseline_stack(
     print("Baseline load empty; retrying with mask dilation and relaxed clouds.")
     relaxed_params = base_params | {
         "mask_filters": [("dilation", 15)],
-        "min_gooddata": 0.20,
+        "min_gooddata": 0.50,
     }
     baseline = load_ard(**relaxed_params)
     if baseline.time.size == 0:
