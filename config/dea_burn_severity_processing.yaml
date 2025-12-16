@@ -22,6 +22,7 @@ s2_measurements:
   - oa_nbart_contiguity
   - oa_s2cloudless_mask
 pre_fire_buffer_days: 50
+nli_holding_days: 7
 post_fire_start_days: 15
 post_fire_window_days: 60
 grass_classes:
