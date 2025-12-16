@@ -222,7 +222,7 @@ def process_single_fire(
     Full burn mapping workflow for a single fire polygon.
     Returns:
         GeoDataFrame dissolved by 'severity' (with 'severity' column),
-        reprojected to 'EPSG:4283', or None if nothing to save.
+  .
     """
 
     os.environ["AWS_NO_SIGN_REQUEST"] = "Yes"
@@ -230,7 +230,7 @@ def process_single_fire(
     gpgon = Geometry(fire_series.geometry, crs=poly_crs)
 
     poly = gpd.GeoDataFrame([fire_series], crs=poly_crs).copy()
-    poly = poly.to_crs("EPSG:4283")
+
 
     attributes = _extract_attribute_values(fire_series)
 
@@ -406,7 +406,7 @@ def process_single_fire(
     print("Vectorizing severity raster...")
     severity_vectors = xr_vectorize(
         final_severity,
-        attribute_col="severity",
+        attribute_col="severity_rating",
         crs=config.output_crs,
         mask=final_severity != 0,
     )
@@ -414,10 +414,23 @@ def process_single_fire(
         print("No burn area detected for this fire.")
         return None
 
-    severity_vectors = severity_vectors.to_crs("EPSG:4283")
-    clipped = severity_vectors.clip(gpd.GeoDataFrame([fire_series], crs=poly_crs).to_crs("EPSG:4283"))
+    clipped = severity_vectors.clip(gpd.GeoDataFrame([fire_series], crs=poly_crs).to_crs("EPSG:3577"))
 
-    aggregated = clipped.dissolve(by="severity").reset_index()
+    aggregated = clipped.dissolve(by="severity_rating").reset_index()
+
+    agregated["severity_rating"] = agregated["severity_rating"].astype(int)
+
+    severity_class_lables = config.severity_list_dict
+    
+    agregated["severity_class"] = aggrigated_severity["severity_rating"].map(severity_class_lables)
+
+        #calculate and add area 
+    aggregated['area_ha'] = round((aggregated["geometry"].area)/10000, 2)
+    
+    #calculate and add perimiter (length measures perimiter of a multipoly)
+    aggregated['perim_km'] =round((aggregated["geometry"].length)/1000, 2)
+
+    
 
     if fire_id is not None:
         aggregated["fire_id"] = fire_id
