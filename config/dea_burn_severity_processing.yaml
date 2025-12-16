@@ -65,6 +65,13 @@ grass_classes:
   - 96
   - 97
 db_table: nli_lastboundaries_trigger
+severity_list_dict:
+  0: Unburnt
+  1: Grass_extent
+  2: Low
+  3: Medium
+  4: High
+  5: Extreme
 db_columns:
   - fire_id
   - fire_name
@@ -79,4 +86,4 @@ db_columns:
   - date_retrieved
   - date_processed
 db_geom_column: geom
-db_output_crs: EPSG:4283
+db_output_crs: EPSG:3577
