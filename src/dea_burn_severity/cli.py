@@ -77,7 +77,7 @@ ATTRIBUTE_COPY_RULES: tuple[dict[str, Any], ...] = (
 FIRE_NAME_FIELDS: tuple[str, ...] = ("fire_name",)
 FIRE_ID_FIELDS: tuple[str, ...] = ("fire_id",)
 IGNITION_DATE_FIELDS: tuple[str, ...] = ("ignition_date", "ignition_d")
-EXTINGUISH_DATE_FIELDS: tuple[str, ...] = ("extinguish_date", "date_retrieved", "date_retri")
+EXTINGUISH_DATE_FIELDS: tuple[str, ...] = ("date_processed")
 
 
 # =============================
