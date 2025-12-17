@@ -72,11 +72,6 @@ ATTRIBUTE_COPY_RULES: tuple[dict[str, Any], ...] = (
         "sources": ("date_processed", "date_proce"),
         "date": True,
     },
-    {
-        "target": "extinguish_date",
-        "sources": ("extinguish_date",),
-        "date": True,
-    },
 )
 
 FIRE_NAME_FIELDS: tuple[str, ...] = ("fire_name",)
@@ -104,14 +99,6 @@ def _first_valid_value(series: pd.Series, keys: Iterable[str]) -> Any | None:
             value = stripped
         return value
     return None
-
-def clean_fire_slug(name: str | None) -> str:
-    if not name:
-        return ""
-    cleaned = re.sub(r"[^A-Za-z0-9\s]", "", str(name))
-    cleaned = re.sub(r"\s+", "_", cleaned).strip("_")
-    return cleaned
-
 
 def _build_vector_filename(
     fire_series: pd.Series, attributes: dict[str, Any]) -> tuple[str, str]:
@@ -174,13 +161,13 @@ def process_single_fire(
         fire_date = process_date(fallback_raw)
     if not fire_date:
         raise ValueError(
-            f"Could not determine ignition date for fire '{fire_display_name}'."
+            f"Could not determine ignition date for fire '{fire_id}'."
         )
 
     processed_date_value = process_date(attributes.get("date_processed"))
     if processed_date_value:
             extinguish_date = datetime.strftime(
-            ((datetime.strptime(assumed_extinguish_date, "%Y-%m-%dT%H:%M:%S.%fZ")) - timedelta(days=config.nli_holding_days)),
+            ((datetime.strptime(processed_date_value, "%Y-%m-%dT%H:%M:%S.%fZ")) - timedelta(days=config.nli_holding_days)),
             "%Y-%m-%dT%H:%M:%S.%fZ")
     else:
         extinguish_date = ( datetime.strptime(fire_date, "%Y-%m-%dT%H:%M:%S.%fZ") + 
@@ -209,7 +196,7 @@ def process_single_fire(
         if log_path:
             append_log(
                 log_path,
-                f"{fire_display_name}\tbaseline_scenes=0\tpost_scenes=0\tgrid=0x0"
+                f"{fire_id}\tbaseline_scenes=0\tpost_scenes=0\tgrid=0x0"
                 "\ttotal_px=0\tvalid_px=0\tburn_px=0\tmasked_px=0",
             )
         print("No baseline data for this fire. Skipping.")
@@ -234,7 +221,7 @@ def process_single_fire(
             )
             append_log(
                 log_path,
-                f"{fire_display_name}\tbaseline_scenes={baseline.time.size}\tpost_scenes=0"
+                f"{fire_id}\tbaseline_scenes={baseline.time.size}\tpost_scenes=0"
                 f"\tgrid={yy}x{xx}\ttotal_px={total_px}\tvalid_px_baseline={bl_valid_px}"
                 "\tburn_px=0\tmasked_px=0",
             )
@@ -257,7 +244,7 @@ def process_single_fire(
             total_px = yy * xx
             append_log(
                 log_path,
-                f"{fire_display_name}\tbaseline_scenes={baseline.time.size}"
+                f"{fire_id}\tbaseline_scenes={baseline.time.size}"
                 f"\tpost_scenes={post.time.size}\tgrid={yy}x{xx}"
                 f"\ttotal_px={total_px}\tvalid_px=0\tburn_px=0\tmasked_px=0"
                 "\tlandcover=missing",
@@ -319,7 +306,7 @@ def process_single_fire(
         append_log(
             log_path,
             (
-                f"{fire_display_name}"
+                f"{fire_id}"
                 f"\tbaseline_scenes={baseline.time.size}"
                 f"\tpost_scenes={post.time.size}"
                 f"\tgrid={yy}x{xx}"
@@ -347,11 +334,11 @@ def process_single_fire(
 
     aggregated = clipped.dissolve(by="severity_rating").reset_index()
 
-    agregated["severity_rating"] = agregated["severity_rating"].astype(int)
+    aggregated["severity_rating"] = aggregated["severity_rating"].astype(int)
 
-    severity_class_lables = config.severity_list_dict
+    severity_class_labels = config.severity_list_dict
     
-    agregated["severity_class"] = aggrigated_severity["severity_rating"].map(severity_class_lables)
+    aggregated["severity_class"] = aggregated["severity_rating"].map(severity_class_labels)
 
         #calculate and add area 
     aggregated['area_ha'] = round((aggregated["geometry"].area)/10000, 2)
@@ -366,11 +353,11 @@ def process_single_fire(
     aggregated["fire_name"] = fire_name_value
     aggregated["ignition_date"] = fire_date
     aggregated["extinguish_date"] = extinguish_date
-    aggregated["fire_type"] = attribute.get("fire_type")
-    aggregated["capt_date"] = attribute.get("capt_date")
-    aggregated["capt_method"] = attribute.get("capt_method")
-    aggregated["state"] = attribute.get("state")
-    aggregated["agency"] = attribute.get("agency")
+    aggregated["fire_type"] = attributes.get("fire_type")
+    aggregated["capt_date"] = attributes.get("capt_date")
+    aggregated["capt_method"] = attributes.get("capt_method")
+    aggregated["state"] = attributes.get("state")
+    aggregated["agency"] = attributes.get("agency")
 
     
     fire_id_for_save, vector_filename = _build_vector_filename(
@@ -435,28 +422,24 @@ def main(config: RuntimeConfig | None = None) -> None:
     print("\nBeginning per-fire processing (single polygon per feature)...")
     for idx, fire_series in all_polys.iterrows():
         fire_attrs = _extract_attribute_values(fire_series)
-        if fire_attrs.get("fire_name"):
-            base_fire_name = str(fire_attrs["fire_name"]).strip()
-        elif fire_attrs.get("fire_id") is not None:
-            base_fire_name = f"fire_id_{fire_attrs['fire_id']}"
+        if fire_attrs.get("fire_id") is not None:
+            base_fire_name = f"fire_id_{fire_attrs['fire_id']}_{idx}"
         else:
             base_fire_name = f"fire_{idx}"
 
-        base_fire_slug = clean_fire_slug(base_fire_name)
-        if not base_fire_slug:
-            base_fire_slug = f"fire_{idx}"
-        base_fire_slug = base_fire_slug.replace(os.sep, "_")
-        if os.altsep:
-            base_fire_slug = base_fire_slug.replace(os.altsep, "_")
 
-        fire_dir = os.path.join(runtime.output_dir, base_fire_slug)
+        #replace base_fire_slug with base_fire_name
+
+        fire_dir = os.path.join(runtime.output_dir, base_fire_name)
         os.makedirs(fire_dir, exist_ok=True)
 
         fire_id_for_save, vector_filename = _build_vector_filename(
-            fire_series=fire_series, attributes=fire_attrs)
+            fire_series=fire_series, attributes=fire_attrs
+        )
         results_dir = os.path.join(fire_dir, "results")
         final_vector_path = os.path.join(results_dir, vector_filename)
-        log_path = os.path.join(fire_dir, f"{ base_fire_slug}_processing.log")
+
+        log_path = os.path.join(fire_dir, f"{base_fire_name}_processing.log")
 
         if not os.path.exists(log_path):
             append_log(
@@ -473,7 +456,7 @@ def main(config: RuntimeConfig | None = None) -> None:
         if not runtime.force_rebuild:
             if is_valid_geojson(final_vector_path):
                 print(
-                    f"[Fire '{base_fire_name}' ({fire_id_for_save})] Local output exists & valid. Skipping."
+                    f"[Fire '{base_fire_name}'] Local output exists & valid. Skipping."
                 )
                 fire_skip += 1
                 skip_due_to_output = True
@@ -486,7 +469,7 @@ def main(config: RuntimeConfig | None = None) -> None:
                 )
                 if s3_key_exists_and_nonempty(s3_fs, bucket, remote_key):
                     print(
-                        f"[Fire '{base_fire_name}' ({fire_id_for_save})] Output exists in S3. Skipping."
+                        f"[Fire '{base_fire_name}'] Output exists in S3. Skipping."
                     )
                     fire_skip += 1
                     skip_due_to_output = True
@@ -503,7 +486,7 @@ def main(config: RuntimeConfig | None = None) -> None:
                 fire_series=fire_series,
                 poly_crs=all_polys.crs,
                 dc=dc,
-                unique_fire_name=base_fire_slug,
+                unique_fire_name=base_fire_name,
                 config=runtime,
                 log_path=log_path,
                 out_dir=fire_dir,
