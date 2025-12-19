@@ -152,8 +152,9 @@ def load_and_prepare_polygons(config: RuntimeConfig) -> gpd.GeoDataFrame | None:
 
     today_date = datetime.now()
 
-    cut_off_date = date.strftime((today_date - timedelta(days=70)), "%Y-%m-%dT%H:%M:%S.%fZ")
-
+    cut_off_date = date.strftime((today_date - timedelta(days=(config.post_fire_window_days + 9)), "%Y-%m-%dT%H:%M:%S.%fZ")
+    #we add 9 days to the post fire window to allow for processing of ARD to definative collection
+                                 
     poly_gpd["date_processed"] = poly_gpd["date_processed"].apply(process_date)
     
     mature_polygons = poly_gdf.drop(poly_gdf[poly_gdf.date_processed < cut_off_date].index)
