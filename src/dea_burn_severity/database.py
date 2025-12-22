@@ -18,16 +18,19 @@ DB_SCHEMA = "public"
 def perform_spatial_dissolve(poly, id_list) -> gpd.GeoDataFrame:
     """takes a list of ids and the corrosponding geopandas dataframe and checks for spatial overlap 
     to see if polygons are actually the same fire or not"""
+
+    geom_to_process = []
+
     for fire in id_list:
         subset = poly[poly['fire_id'] == fire].copy()
         
         # Find largest
         area_list = subset['area_ha'].unique()
         largest = subset[subset['area_ha'] == area_list.max()]
-        largest_dc = Geometry(largest.geometry.iloc[0], crs=poly.crs)
+        largest_dc = largest.geometry.iloc[0]
         
          # Check overlaps
-        do_they_overlap = subset.intersects(largest_dc.geom)
+        do_they_overlap = subset.geometry.intersects(largest_dc)
         
         # Non-overlapping shapes
         unique_shapes = subset[~do_they_overlap]
@@ -42,7 +45,8 @@ def perform_spatial_dissolve(poly, id_list) -> gpd.GeoDataFrame:
         
         combine_to_one = non_unique_shapes.dissolve(aggfunc=agg)
         geom_to_process.append(combine_to_one)
-    return final_gdf_to_process = gpd.GeoDataFrame(pd.concat(geom_to_process, ignore_index=True), crs=poly.crs)
+        
+    return gpd.GeoDataFrame(pd.concat(geom_to_process, ignore_index=True), crs=poly.crs)
 
 def load_polygons_from_database(config: RuntimeConfig) -> gpd.GeoDataFrame:
     """
