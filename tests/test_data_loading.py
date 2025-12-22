@@ -74,7 +74,7 @@ def test_load_baseline_stack_builds_relaxed_composite(monkeypatch):
         config=_runtime_config(),
     )
 
-    assert calls == [0.99, 0.2]
+    assert calls == [0.99, 0.5]
     assert baseline.time.size == 2
     assert "time" not in composite.dims
     assert composite.nbart_green.values.item() == 5.0

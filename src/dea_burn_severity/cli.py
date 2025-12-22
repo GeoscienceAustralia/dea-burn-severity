@@ -31,6 +31,7 @@ from .configuration import (
     build_runtime_config,
     get_default_runtime_config,
 )
+from .date_time import process_date
 from .data_loading import load_ard_with_fallback, load_baseline_stack
 from .database import load_and_prepare_polygons
 from .logging_utils import append_log
@@ -71,17 +72,12 @@ ATTRIBUTE_COPY_RULES: tuple[dict[str, Any], ...] = (
         "sources": ("date_processed", "date_proce"),
         "date": True,
     },
-    {
-        "target": "extinguish_date",
-        "sources": ("extinguish_date",),
-        "date": True,
-    },
 )
 
 FIRE_NAME_FIELDS: tuple[str, ...] = ("fire_name",)
 FIRE_ID_FIELDS: tuple[str, ...] = ("fire_id",)
 IGNITION_DATE_FIELDS: tuple[str, ...] = ("ignition_date", "ignition_d")
-EXTINGUISH_DATE_FIELDS: tuple[str, ...] = ("extinguish_date", "date_retrieved", "date_retri")
+EXTINGUISH_DATE_FIELDS: tuple[str, ...] = ("date_processed")
 
 
 # =============================
@@ -104,61 +100,15 @@ def _first_valid_value(series: pd.Series, keys: Iterable[str]) -> Any | None:
         return value
     return None
 
-
-def _is_valid_date_string(value: str) -> bool:
-    return bool(re.match(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$", value))
-
-
-def process_date(value: Any) -> str | None:
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return None
-    if isinstance(value, (datetime, pd.Timestamp)):
-        return pd.to_datetime(value).strftime("%Y-%m-%d")
-    if isinstance(value, np.datetime64):
-        return pd.to_datetime(value).strftime("%Y-%m-%d")
-    text = str(value).strip()
-    if not text or text.lower() in {"none", "nan", "null"}:
-        return None
-    if _is_valid_date_string(text):
-        return text
-    digits = re.sub(r"[^0-9]", "", text)
-    if len(digits) >= 8:
-        return f"{digits[0:4]}-{digits[4:6]}-{digits[6:8]}"
-    return None
-
-
-def clean_fire_slug(name: str | None) -> str:
-    if not name:
-        return ""
-    cleaned = re.sub(r"[^A-Za-z0-9\s]", "", str(name))
-    cleaned = re.sub(r"\s+", "_", cleaned).strip("_")
-    return cleaned
-
-
-def _format_results_filename(
-    identifier_source: Any | None, date_source: Any | None, fallback_slug: str
-) -> tuple[str, str]:
-    """Return file-friendly identifier/date tuple for DEA outputs."""
-    identifier = clean_fire_slug(str(identifier_source).strip()) if identifier_source not in (None, "") else ""
-    if not identifier:
-        identifier = fallback_slug
-    date_value = process_date(date_source)
-    if not date_value:
-        date_value = datetime.utcnow().strftime("%Y-%m-%d")
-    fire_id_for_save = f"{identifier}_{date_value}"
-    return fire_id_for_save, f"DEA_burn_severity_{fire_id_for_save}.json"
-
-
 def _build_vector_filename(
-    fire_series: pd.Series, attributes: dict[str, Any], fallback_slug: str
-) -> tuple[str, str]:
+    fire_series: pd.Series, attributes: dict[str, Any]) -> tuple[str, str]:
+    """Return file-friendly identifier/date tuple for DEA outputs."""
     identifier_src = attributes.get("fire_id")
     if identifier_src in (None, ""):
         identifier_src = _first_valid_value(fire_series, FIRE_ID_FIELDS)
-    processed_date_src = attributes.get("date_processed")
-    if processed_date_src in (None, ""):
-        processed_date_src = _first_valid_value(fire_series, ("date_processed", "date_proce"))
-    return _format_results_filename(identifier_src, processed_date_src, fallback_slug)
+    processed_date_src =  str(datetime.now()).strip()
+    fire_id_for_save = f"{identifier_src}_{processed_date_src}"
+    return fire_id_for_save, f"DEA_burn_severity_{fire_id_for_save}.geojson"
 
 
 def _extract_attribute_values(series: pd.Series) -> dict[str, Any]:
@@ -189,7 +139,7 @@ def process_single_fire(
     Full burn mapping workflow for a single fire polygon.
     Returns:
         GeoDataFrame dissolved by 'severity' (with 'severity' column),
-        reprojected to 'EPSG:4283', or None if nothing to save.
+  .
     """
 
     os.environ["AWS_NO_SIGN_REQUEST"] = "Yes"
@@ -197,40 +147,40 @@ def process_single_fire(
     gpgon = Geometry(fire_series.geometry, crs=poly_crs)
 
     poly = gpd.GeoDataFrame([fire_series], crs=poly_crs).copy()
-    poly = poly.to_crs("EPSG:4283")
+
 
     attributes = _extract_attribute_values(fire_series)
 
     fire_id = attributes.get("fire_id")
     fire_name_value = attributes.get("fire_name")
-    fire_slug = unique_fire_name
-    fire_display_name = str(fire_name_value).strip() if fire_name_value else fire_slug
 
-    fire_date = attributes.get("ignition_date")
+
+    fire_date = process_date(attributes.get("ignition_date"))
     if not fire_date:
         fallback_raw = _first_valid_value(fire_series, ("capt_date", "capture_date", "capture_da"))
         fire_date = process_date(fallback_raw)
     if not fire_date:
         raise ValueError(
-            f"Could not determine ignition date for fire '{fire_display_name}'."
+            f"Could not determine ignition date for fire '{fire_id}'."
         )
 
-    extinguish_date_value = attributes.get("date_retrieved") or attributes.get("extinguish_date")
-    extinguish_date = extinguish_date_value if extinguish_date_value else "None"
+    processed_date_value = process_date(attributes.get("date_processed"))
+    if processed_date_value:
+            extinguish_date = datetime.strftime(
+            ((datetime.strptime(processed_date_value, "%Y-%m-%dT%H:%M:%S.%fZ")) - timedelta(days=config.nli_holding_days)),
+            "%Y-%m-%dT%H:%M:%S.%fZ")
+    else:
+        extinguish_date = ( datetime.strptime(fire_date, "%Y-%m-%dT%H:%M:%S.%fZ") + 
+                           timedelta(days=config.post_fire_start_days)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
     start_date_pre = (
-        datetime.strptime(fire_date, "%Y-%m-%d") - timedelta(days=config.pre_fire_buffer_days)
+        datetime.strptime(fire_date, "%Y-%m-%dT%H:%M:%S.%fZ") - timedelta(days=config.pre_fire_buffer_days)
     ).strftime("%Y-%m-%d")
     end_date_pre = (
-        datetime.strptime(fire_date, "%Y-%m-%d") - timedelta(days=1)
+        datetime.strptime(fire_date, "%Y-%m-%dT%H:%M:%S.%fZ") - timedelta(days=1)
     ).strftime("%Y-%m-%d")
 
-    if extinguish_date == "None":
-        start_date_post = (
-            datetime.strptime(fire_date, "%Y-%m-%d") + timedelta(days=config.post_fire_start_days)
-        ).strftime("%Y-%m-%d")
-    else:
-        start_date_post = extinguish_date
+    start_date_post = datetime.strptime(extinguish_date, "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%Y-%m-%d")
 
     end_date_post = (
         datetime.strptime(start_date_post, "%Y-%m-%d")
@@ -246,7 +196,7 @@ def process_single_fire(
         if log_path:
             append_log(
                 log_path,
-                f"{fire_display_name}\tbaseline_scenes=0\tpost_scenes=0\tgrid=0x0"
+                f"{fire_id}\tbaseline_scenes=0\tpost_scenes=0\tgrid=0x0"
                 "\ttotal_px=0\tvalid_px=0\tburn_px=0\tmasked_px=0",
             )
         print("No baseline data for this fire. Skipping.")
@@ -257,7 +207,7 @@ def process_single_fire(
         gpgon,
         time=(start_date_post, end_date_post),
         config=config,
-        min_gooddata_thresholds=(0.90,),
+        min_gooddata_thresholds=(0.90,0.50),
     )
     if post.time.size == 0:
         if log_path:
@@ -271,7 +221,7 @@ def process_single_fire(
             )
             append_log(
                 log_path,
-                f"{fire_display_name}\tbaseline_scenes={baseline.time.size}\tpost_scenes=0"
+                f"{fire_id}\tbaseline_scenes={baseline.time.size}\tpost_scenes=0"
                 f"\tgrid={yy}x{xx}\ttotal_px={total_px}\tvalid_px_baseline={bl_valid_px}"
                 "\tburn_px=0\tmasked_px=0",
             )
@@ -294,7 +244,7 @@ def process_single_fire(
             total_px = yy * xx
             append_log(
                 log_path,
-                f"{fire_display_name}\tbaseline_scenes={baseline.time.size}"
+                f"{fire_id}\tbaseline_scenes={baseline.time.size}"
                 f"\tpost_scenes={post.time.size}\tgrid={yy}x{xx}"
                 f"\ttotal_px={total_px}\tvalid_px=0\tburn_px=0\tmasked_px=0"
                 "\tlandcover=missing",
@@ -356,7 +306,7 @@ def process_single_fire(
         append_log(
             log_path,
             (
-                f"{fire_display_name}"
+                f"{fire_id}"
                 f"\tbaseline_scenes={baseline.time.size}"
                 f"\tpost_scenes={post.time.size}"
                 f"\tgrid={yy}x{xx}"
@@ -372,7 +322,7 @@ def process_single_fire(
     print("Vectorizing severity raster...")
     severity_vectors = xr_vectorize(
         final_severity,
-        attribute_col="severity",
+        attribute_col="severity_rating",
         crs=config.output_crs,
         mask=final_severity != 0,
     )
@@ -380,44 +330,59 @@ def process_single_fire(
         print("No burn area detected for this fire.")
         return None
 
-    severity_vectors = severity_vectors.to_crs("EPSG:4283")
-    clipped = severity_vectors.clip(gpd.GeoDataFrame([fire_series], crs=poly_crs).to_crs("EPSG:4283"))
+    clipped = severity_vectors.clip(gpd.GeoDataFrame([fire_series], crs=poly_crs).to_crs("EPSG:3577"))
 
-    aggregated = clipped.dissolve(by="severity").reset_index()
+    aggregated = clipped.dissolve(by="severity_rating").reset_index()
+
+    aggregated["severity_rating"] = aggregated["severity_rating"].astype(int)
+
+    severity_class_labels = config.severity_list_dict
+    
+    aggregated["severity_class"] = aggregated["severity_rating"].map(severity_class_labels)
+
+        #calculate and add area 
+    aggregated['area_ha'] = round((aggregated["geometry"].area)/10000, 2)
+    
+    #calculate and add perimiter (length measures perimiter of a multipoly)
+    aggregated['perim_km'] =round((aggregated["geometry"].length)/1000, 2)
+
+    
 
     if fire_id is not None:
         aggregated["fire_id"] = fire_id
-    aggregated["fire_name"] = fire_name_value or fire_slug
+    aggregated["fire_name"] = fire_name_value
     aggregated["ignition_date"] = fire_date
     aggregated["extinguish_date"] = extinguish_date
-    fire_id_for_save, vector_filename = _build_vector_filename(
-        fire_series=fire_series, attributes=attributes, fallback_slug=fire_slug
-    )
+    aggregated["fire_type"] = attributes.get("fire_type")
+    aggregated["capt_date"] = attributes.get("capt_date")
+    aggregated["capt_method"] = attributes.get("capt_method")
+    aggregated["state"] = attributes.get("state")
+    aggregated["agency"] = attributes.get("agency")
 
-    for key, value in attributes.items():
-        if key in {"fire_id", "fire_name", "ignition_date", "extinguish_date"}:
-            continue
-        aggregated[key] = value
+    
+    fire_id_for_save, vector_filename = _build_vector_filename(
+        fire_series=fire_series, attributes=attributes
+    )
 
     base_dir = out_dir if out_dir else config.output_dir
     os.makedirs(base_dir, exist_ok=True)
     results_dir = os.path.join(base_dir, "results")
     os.makedirs(results_dir, exist_ok=True)
 
-    # This matches the required DEA_burn_severity_<fire_id>_<date>.json naming.
+    # This matches the required DEA_burn_severity_<fire_id>_<date>.geojson naming.
     out_vec = os.path.join(results_dir, vector_filename)
     aggregated.to_file(out_vec, driver="GeoJSON")
     print(f"Saved per-fire severity GeoJSON ({fire_id_for_save}): {out_vec}")
 
-    out_cog_preview = os.path.join(base_dir, f"s2_postfire_preview_{fire_slug}.tif")
+    out_cog_preview = os.path.join(base_dir, f"s2_postfire_preview_{fire_id_for_save}.tif")
     write_cog(post.isel(time=0).to_array().compute(), fname=out_cog_preview, overwrite=True)
     print(f"Saved post-fire preview COG: {out_cog_preview}")
 
-    out_cog_debug = os.path.join(base_dir, f"debug_mask_raster_{fire_slug}.tif")
+    out_cog_debug = os.path.join(base_dir, f"debug_mask_raster_{fire_id_for_save}.tif")
     write_cog(debug_mask.compute(), fname=out_cog_debug, overwrite=True)
     print(f"Saved debug mask COG: {out_cog_debug}")
 
-    print(f"Successfully processed fire: {fire_display_name}")
+    print(f"Successfully processed fire: {fire_id_for_save}")
     return aggregated
 
 
@@ -457,29 +422,24 @@ def main(config: RuntimeConfig | None = None) -> None:
     print("\nBeginning per-fire processing (single polygon per feature)...")
     for idx, fire_series in all_polys.iterrows():
         fire_attrs = _extract_attribute_values(fire_series)
-        if fire_attrs.get("fire_name"):
-            base_fire_name = str(fire_attrs["fire_name"]).strip()
-        elif fire_attrs.get("fire_id") is not None:
-            base_fire_name = f"fire_id_{fire_attrs['fire_id']}"
+        if fire_attrs.get("fire_id") is not None:
+            base_fire_name = f"fire_id_{fire_attrs['fire_id']}_{idx}"
         else:
             base_fire_name = f"fire_{idx}"
 
-        base_fire_slug = clean_fire_slug(base_fire_name)
-        if not base_fire_slug:
-            base_fire_slug = f"fire_{idx}"
-        base_fire_slug = base_fire_slug.replace(os.sep, "_")
-        if os.altsep:
-            base_fire_slug = base_fire_slug.replace(os.altsep, "_")
 
-        fire_dir = os.path.join(runtime.output_dir, base_fire_slug)
+        #replace base_fire_slug with base_fire_name
+
+        fire_dir = os.path.join(runtime.output_dir, base_fire_name)
         os.makedirs(fire_dir, exist_ok=True)
 
         fire_id_for_save, vector_filename = _build_vector_filename(
-            fire_series=fire_series, attributes=fire_attrs, fallback_slug=base_fire_slug
+            fire_series=fire_series, attributes=fire_attrs
         )
         results_dir = os.path.join(fire_dir, "results")
         final_vector_path = os.path.join(results_dir, vector_filename)
-        log_path = os.path.join(fire_dir, f"{base_fire_slug}_processing.log")
+
+        log_path = os.path.join(fire_dir, f"{base_fire_name}_processing.log")
 
         if not os.path.exists(log_path):
             append_log(
@@ -496,7 +456,7 @@ def main(config: RuntimeConfig | None = None) -> None:
         if not runtime.force_rebuild:
             if is_valid_geojson(final_vector_path):
                 print(
-                    f"[Fire '{base_fire_name}' ({fire_id_for_save})] Local output exists & valid. Skipping."
+                    f"[Fire '{base_fire_name}'] Local output exists & valid. Skipping."
                 )
                 fire_skip += 1
                 skip_due_to_output = True
@@ -509,7 +469,7 @@ def main(config: RuntimeConfig | None = None) -> None:
                 )
                 if s3_key_exists_and_nonempty(s3_fs, bucket, remote_key):
                     print(
-                        f"[Fire '{base_fire_name}' ({fire_id_for_save})] Output exists in S3. Skipping."
+                        f"[Fire '{base_fire_name}'] Output exists in S3. Skipping."
                     )
                     fire_skip += 1
                     skip_due_to_output = True
@@ -526,7 +486,7 @@ def main(config: RuntimeConfig | None = None) -> None:
                 fire_series=fire_series,
                 poly_crs=all_polys.crs,
                 dc=dc,
-                unique_fire_name=base_fire_slug,
+                unique_fire_name=base_fire_name,
                 config=runtime,
                 log_path=log_path,
                 out_dir=fire_dir,

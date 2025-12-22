@@ -3,17 +3,50 @@ Database access helpers for burn severity processing.
 """
 
 from __future__ import annotations
-
+from datetime import datetime, timedelta, date
 import json
 from typing import Any
 
 import geopandas as gpd
 from shapely.geometry import shape
-
+from datacube.utils.geometry import Geometry
 from .configuration import RuntimeConfig
+from .date_time import process_date
 
 DB_SCHEMA = "public"
 
+def perform_spatial_dissolve(poly, id_list) -> gpd.GeoDataFrame:
+    """takes a list of ids and the corrosponding geopandas dataframe and checks for spatial overlap 
+    to see if polygons are actually the same fire or not"""
+
+    geom_to_process = []
+
+    for fire in id_list:
+        subset = poly[poly['fire_id'] == fire].copy()
+        
+        # Find largest
+        area_list = subset['area_ha'].unique()
+        largest = subset[subset['area_ha'] == area_list.max()]
+        largest_dc = largest.geometry.iloc[0]
+        
+         # Check overlaps
+        do_they_overlap = subset.geometry.intersects(largest_dc)
+        
+        # Non-overlapping shapes
+        unique_shapes = subset[~do_they_overlap]
+        for idx, row in unique_shapes.iterrows():
+            geom_to_process.append(gpd.GeoDataFrame(row.to_frame().T, geometry='geometry', crs=poly.crs))  # Convert Series to DataFrame
+        
+        # Overlapping shapes dissolved
+        non_unique_shapes = subset[do_they_overlap]
+        
+        agg = {col: "first" for col in subset.columns if col not in ["geometry", "ignition_date", "capt_date", "date_processed"]}
+        agg.update({"ignition_date": "min", "capt_date": "min", "date_processed": "max"})
+        
+        combine_to_one = non_unique_shapes.dissolve(aggfunc=agg)
+        geom_to_process.append(combine_to_one)
+        
+    return gpd.GeoDataFrame(pd.concat(geom_to_process, ignore_index=True), crs=poly.crs)
 
 def load_polygons_from_database(config: RuntimeConfig) -> gpd.GeoDataFrame:
     """
@@ -98,6 +131,9 @@ def load_polygons_from_database(config: RuntimeConfig) -> gpd.GeoDataFrame:
 def load_and_prepare_polygons(config: RuntimeConfig) -> gpd.GeoDataFrame | None:
     """
     Loads fire polygons from the configured database and prepares them for processing.
+    filters polygons by date -> only process mature polygons.
+    drops polygons with no area
+    dissolves polygons with same id and spatial overlap.
     Dissolves by 'fire_id' if available to ensure one row per fire.
     """
     try:
@@ -106,19 +142,28 @@ def load_and_prepare_polygons(config: RuntimeConfig) -> gpd.GeoDataFrame | None:
         print(f"Error: Failed loading polygons from database: {exc}")
         return None
 
-    try:
-        if len(poly_gdf) > 1 and "fire_id" in poly_gdf.columns:
-            print("Dissolving polygons by 'fire_id'...")
-            poly_gdf = poly_gdf.dissolve(by="fire_id", aggfunc="first")
-        elif "fire_id" not in poly_gdf.columns:
-            print("Warning: 'fire_id' not in columns. Skipping dissolve.")
-    except TypeError as exc:
-        print(f"Warning: Could not dissolve polygon ({exc}). Continuing with loaded data.")
-
+    # drop very small polygons
+    poly_gdf = poly_gdf.drop(poly_gdf[poly_gdf.area_ha < 1].index)
+    
     if "fire_id" not in poly_gdf.columns:
         poly_gdf["fire_id"] = list(poly_gdf.index)
 
-    return poly_gdf
+    else:
+        #make a list of id's 
+        list_of_fires = list(set(poly_gdf['fire_id']))
+    
+        poly_gpd = perform_spatial_dissolve(poly_gdf, list_of_fires)
+
+    today_date = datetime.now()
+
+    cut_off_date = date.strftime(today_date - timedelta(days=(config.post_fire_window_days + 9)), "%Y-%m-%dT%H:%M:%S.%fZ")
+    #we add 9 days to the post fire window to allow for processing of ARD to definative collection
+                                 
+    poly_gpd["date_processed"] = poly_gpd["date_processed"].apply(process_date)
+    
+    mature_polygons = poly_gdf.drop(poly_gdf[poly_gdf.date_processed < cut_off_date].index)
+
+    return mature_polygons
 
 
 __all__ = ["DB_SCHEMA", "load_and_prepare_polygons", "load_polygons_from_database"]
