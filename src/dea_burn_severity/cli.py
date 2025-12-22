@@ -102,7 +102,7 @@ def _first_valid_value(series: pd.Series, keys: Iterable[str]) -> Any | None:
 
 def _build_vector_filename(
     fire_series: pd.Series, attributes: dict[str, Any]) -> tuple[str, str]:
-        """Return file-friendly identifier/date tuple for DEA outputs."""
+    """Return file-friendly identifier/date tuple for DEA outputs."""
     identifier_src = attributes.get("fire_id")
     if identifier_src in (None, ""):
         identifier_src = _first_valid_value(fire_series, FIRE_ID_FIELDS)

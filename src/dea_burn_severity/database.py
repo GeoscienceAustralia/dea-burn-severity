@@ -3,7 +3,7 @@ Database access helpers for burn severity processing.
 """
 
 from __future__ import annotations
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import json
 from typing import Any
 
@@ -18,7 +18,7 @@ DB_SCHEMA = "public"
 def perform_spatial_dissolve(poly, id_list) -> gpd.GeoDataFrame:
     """takes a list of ids and the corrosponding geopandas dataframe and checks for spatial overlap 
     to see if polygons are actually the same fire or not"""
-    for fire in is_list:
+    for fire in id_list:
         subset = poly[poly['fire_id'] == fire].copy()
         
         # Find largest
@@ -152,7 +152,7 @@ def load_and_prepare_polygons(config: RuntimeConfig) -> gpd.GeoDataFrame | None:
 
     today_date = datetime.now()
 
-    cut_off_date = date.strftime((today_date - timedelta(days=(config.post_fire_window_days + 9)), "%Y-%m-%dT%H:%M:%S.%fZ")
+    cut_off_date = date.strftime(today_date - timedelta(days=(config.post_fire_window_days + 9)), "%Y-%m-%dT%H:%M:%S.%fZ")
     #we add 9 days to the post fire window to allow for processing of ARD to definative collection
                                  
     poly_gpd["date_processed"] = poly_gpd["date_processed"].apply(process_date)
