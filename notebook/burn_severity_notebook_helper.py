@@ -6,6 +6,13 @@ import xarray as xr
 import numpy as np
 import re
 
+import json
+from typing import Any
+
+import geopandas as gpd
+import pandas as pd
+from shapely.geometry import shape
+
 from dea_tools.bandindices import calculate_indices
 from dea_tools.datahandling import load_ard
 from dea_tools.spatial import xr_vectorize
@@ -42,6 +49,8 @@ measurements = ['nbart_blue', 'nbart_green', 'nbart_red',
                 'nbart_nir_1','nbart_nir_2', 'nbart_swir_2','nbart_swir_3','oa_nbart_contiguity','oa_s2cloudless_mask']
 
 output_crs = 'EPSG:3577'
+
+
 
 
 def find_latest_valid_pixel(dataset):
@@ -84,6 +93,10 @@ def clean_name(name: str) -> str:
     return cleaned
 
 
+def _to_iso_z(dt: datetime) -> str:
+    # ISO
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
 
 def is_date_iso(date_str):
     """ checks to see if date string has desiered ios UTC format by trying to convert it to datetime object
@@ -101,7 +114,7 @@ def is_date_iso(date_str):
 def is_date_DEA_format(date_str):
     # test for YYYY-MM-DD format date:
     try:
-        datetime.strptime(date_str, "%Y-%m-%d")
+        datetime.strptime(date_str[0:10], "%Y-%m-%d")
         return True
     except (ValueError, TypeError):
         return False
@@ -112,30 +125,33 @@ def process_date(date):
     a valid date either as YYYY-MM-DD, YYYYMMDD or YYYYMMDDhhmmss and format as above (assume the time is noon if no time is given)
 
     otherwise return None. """
-    if pd.isna(date):  # Handles NaT and None
-        return None
+
+    try:
+        date_as_str = str(date)
+        print(f'date as string is {date_as_str}')
+    except:
+        return
     
-    elif type(date) == pd._libs.tslibs.timestamps.Timestamp:
-        date = date.to_pydatetime()
-        return date.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-    elif isinstance(date, datetime):
-        return date.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-    elif is_date_iso(date) == True:
+    if date_as_str == 'nan':
+        return
+        
+    if date_as_str == '0':
+        return
+    
+    elif is_date_iso(date_as_str) == True:
         return date
         
-    elif is_date_DEA_format(date) == True:
-        return f'{date}T12:00:00.0Z'
+    elif is_date_DEA_format(date_as_str) == True:
+        return f'{date_as_str[0:10]}T12:00:00.0Z'
         
-    elif bool(re.match(r'^\d+$', date)) == True:
-        if len(date) == 14:
+    elif bool(re.match(r'^\d+$', date_as_str)) == True:
+        if len(date_as_str) == 14:
             return f'{date[0:4]}-{date[4:6]}-{date[6:8]}T{date[8:10]}:{date[10:12]}:{date[12:14]}.0Z'
         else:
             return f'{date[0:4]}-{date[4:6]}-{date[6:8]}T12:00:00.0Z'
     else:
         try:
-            as_date = datetime.strptime(date, "%Y%m%d%H%M%S.%f")
+            as_date = datetime.strptime(date_as_str, "%Y%m%d%H%M%S.%f")
             return as_date.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             
         except ValueError:
@@ -211,6 +227,82 @@ def display_geometry_on_map(geom, zoom_bias=0):
 
     return m
 
+def load_polygons_from_database(db_table, db_columns=[], db_geom_column = 'geom',
+                                db_output_crs = 'EPSG:4283', DB_SCHEMA = "public") -> gpd.GeoDataFrame:
+    """
+    Load polygons directly from the configured PostgreSQL/PostGIS table.
+    """
+    
+    try:
+        import psycopg2  # type: ignore
+        from psycopg2 import sql  # type: ignore
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "Database polygon loading requires the 'psycopg2-binary' package. "
+            "Install with: pip install psycopg2-binary"
+        ) from exc
+
+    conn = psycopg2.connect(
+        host="db-aurora-dea-fire-severity.cluster-cxhoeczwhtar.ap-southeast-2.rds.amazonaws.com",
+        dbname="fire_severity_product",
+        port="5432",
+        user="processing_user_ro",
+        password="isrTK76q\=1=!11XE^")
+
+    table_identifier = (
+        sql.Identifier(DB_SCHEMA, db_table)
+        if DB_SCHEMA
+        else sql.Identifier(db_table)
+    )
+    select_clause = sql.SQL(", ").join(sql.Identifier(col) for col in db_columns)
+    query = sql.SQL(
+        "SELECT {fields}, ST_AsGeoJSON({geom}) AS geom_geojson FROM {table}"
+    ).format(
+        fields=select_clause,
+        geom=sql.Identifier(db_geom_column),
+        table=table_identifier,
+    )
+
+    print(
+        f"Querying polygons from table '{DB_SCHEMA + '.' if DB_SCHEMA else ''}{db_table}'..."
+    )
+    records: list[dict[str, Any]] = []
+    failures = 0
+
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(query)
+            rows = cur.fetchall()
+            print(f"Retrieved {len(rows)} rows from database.")
+            for idx, row in enumerate(rows):
+                attr_values = row[:-1]
+                geom_raw = row[-1]
+                try:
+                    json_start = geom_raw.find("{")
+                    geom_str = geom_raw[json_start:] if json_start >= 0 else geom_raw
+                    geom_mapping = json.loads(geom_str)
+                    geom_obj = shape(geom_mapping)
+                except Exception as exc:
+                    failures += 1
+                    print(f"Warning: Failed to parse geometry for row {idx}: {exc}")
+                    continue
+
+                record = {col: val for col, val in zip(db_columns, attr_values)}
+                record["geometry"] = geom_obj
+                records.append(record)
+    finally:
+        conn.close()
+
+    if failures:
+        print(f"Skipped {failures} rows due to geometry parsing errors.")
+    if not records:
+        return gpd.GeoDataFrame(
+            columns=[*db_columns, "geometry"], crs=db_output_crs
+        )
+
+    return gpd.GeoDataFrame(records, crs=db_output_crs)
+
+
 def perform_spatial_dissolve(poly, id_list) -> gpd.GeoDataFrame:
     """takes a list of ids and the corrosponding geopandas dataframe and checks for spatial overlap 
     to see if polygons are actually the same fire or not"""
@@ -246,6 +338,8 @@ def perform_spatial_dissolve(poly, id_list) -> gpd.GeoDataFrame:
 
 def map_burn_severity(random_fire):
 
+    print('CONDUCTING BURN SEVERITY MAPPING', random_fire)
+        
     gpgon = datacube.utils.geometry.Geometry(random_fire.iloc[0].geometry, crs=random_fire.crs)
     
     fire_date = process_date(random_fire.ignition_date.iloc[0])
@@ -269,8 +363,8 @@ def map_burn_severity(random_fire):
 
         
     except AttributeError as e:
-        print('this fire has no processed date :(')
         
+        print('this fire has no processed date :(')
         return
     
     landcover_year = str(int(fire_date[0:4]) - 1)
