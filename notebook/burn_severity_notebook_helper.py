@@ -227,7 +227,7 @@ def display_geometry_on_map(geom, zoom_bias=0):
 
     return m
 
-def load_polygons_from_database(db_table, db_columns=[], db_geom_column = 'geom',
+def load_polygons_from_database(user, password, db_table, db_columns=[], db_geom_column = 'geom',
                                 db_output_crs = 'EPSG:4283', DB_SCHEMA = "public") -> gpd.GeoDataFrame:
     """
     Load polygons directly from the configured PostgreSQL/PostGIS table.
@@ -246,8 +246,8 @@ def load_polygons_from_database(db_table, db_columns=[], db_geom_column = 'geom'
         host="db-aurora-dea-fire-severity.cluster-cxhoeczwhtar.ap-southeast-2.rds.amazonaws.com",
         dbname="fire_severity_product",
         port="5432",
-        user="processing_user_ro",
-        password="isrTK76q\=1=!11XE^")
+        user= user,
+        password= password)
 
     table_identifier = (
         sql.Identifier(DB_SCHEMA, db_table)
@@ -301,6 +301,7 @@ def load_polygons_from_database(db_table, db_columns=[], db_geom_column = 'geom'
         )
 
     return gpd.GeoDataFrame(records, crs=db_output_crs)
+
 
 
 def perform_spatial_dissolve(poly, id_list) -> gpd.GeoDataFrame:
@@ -429,7 +430,23 @@ def map_burn_severity(random_fire):
                             group_by='solar_day',
                             dask_chunks= {"x": 2048, "y": 2048})
 
-        #find most recent clean pixel :)
+        if baseline.time.size == 0:
+            #if still 0 times load with no cloud masking
+            baseline = load_ard(dc=dc,
+                    products=['ga_s2am_ard_3', 'ga_s2bm_ard_3','ga_s2cm_ard_3'],
+                    geopolygon=gpgon,
+                    cloud_mask = 's2cloudless',
+                    # x=study_area_lon,
+                    # y=study_area_lat,
+                    time=(start_date_pre, end_date_pre),
+                    measurements=measurements,
+                    # min_gooddata=0.50, #we want no clouds for the pre-fire image
+                    output_crs=output_crs,
+                    resolution=resolution,
+                    group_by='solar_day',
+                    dask_chunks= {"x": 2048, "y": 2048})
+
+ 
         closest_Bl = find_latest_valid_pixel(baseline)
     
     else:
