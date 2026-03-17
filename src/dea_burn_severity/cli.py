@@ -455,7 +455,7 @@ def main(config: RuntimeConfig | None = None) -> None:
     fire_success = fire_fail = fire_skip = 0
 
     print("\nBeginning per-fire processing (single polygon per feature)...")
-    for idx, fire_series in all_polys.iterrows():
+    for idx, fire_series in all_polys[:1].iterrows():
         fire_attrs = _extract_attribute_values(fire_series)
         if fire_attrs.get("fire_name"):
             base_fire_name = str(fire_attrs["fire_name"]).strip()
