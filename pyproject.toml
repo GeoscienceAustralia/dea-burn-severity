@@ -2,6 +2,10 @@
 requires = ["setuptools<81", "wheel"]
 build-backend = "setuptools.build_meta"
 
+# TODO before uv sync, run the following:
+# $ sudo apt-get install libpq-dev postgresql-lib proj-bin
+
+
 [project]
 name = "dea-burn-severity"
 version = "0.1.0"
