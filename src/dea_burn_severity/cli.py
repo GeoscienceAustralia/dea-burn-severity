@@ -18,7 +18,6 @@ import datacube
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-import xarray as xr
 from datacube.utils.geometry import CRS, Geometry
 
 from dea_tools.bandindices import calculate_indices
@@ -32,7 +31,7 @@ from .configuration import (
     get_default_runtime_config,
 )
 from .data_loading import load_ard_with_fallback, load_baseline_stack
-from .database import load_and_prepare_polygons
+from .database import InputDatabase
 from .logging_utils import append_log
 from .result_io import (
     is_valid_geojson,
@@ -445,8 +444,9 @@ def main(config: RuntimeConfig | None = None) -> None:
             upload_to_s3 = False
 
     dc = datacube.Datacube(app=runtime.app_name)
-
-    all_polys = load_and_prepare_polygons(runtime)
+    
+    input_db = InputDatabase(runtime)
+    all_polys = input_db.load_and_prepare_polygons()
     if all_polys is None or all_polys.empty:
         print("No polygons loaded. Exiting.")
         return
@@ -608,7 +608,7 @@ def cli(**kwargs: Any) -> None:
     """
     Console script entry point.
     """
-    config_path = kwargs.pop("config", None)
+    config_path: Any = kwargs.pop("config", None)
 
     try:
         runtime_config = build_runtime_config(kwargs, config_path)
