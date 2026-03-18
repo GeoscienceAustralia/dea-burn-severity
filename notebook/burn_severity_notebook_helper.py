@@ -370,7 +370,9 @@ def map_burn_severity(random_fire):
     
     landcover_year = str(int(fire_date[0:4]) - 1)
 
-
+    #add in saftynet for landcover when new year starts. remove when 2025 landcover is published
+    if int(landcover_year) > 2024:
+        landcover_year = '2024'
     
     #Harcoding in WA's buffers, pre-immage witin 50 days before, post fire is 60 days after
     
