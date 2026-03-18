@@ -188,6 +188,10 @@ def process_single_fire(
     ).strftime("%Y-%m-%d")
 
     landcover_year = str(int(fire_date[0:4]) - 1)
+    
+    #add in saftynet for landcover when new year starts. remove when 2025 landcover is published
+    if int(landcover_year) > 2024:
+        landcover_year = '2024'
 
     baseline, closest_bl = load_baseline_stack(
         dc, gpgon, time=(start_date_pre, end_date_pre), config=config
