@@ -48,7 +48,7 @@ class InputDatabase:
         self.table_identifier = sql.Identifier(InputDatabase.DB_SCHEMA, config.db_table)
         self.db_output_crs = config.db_output_crs
 
-    def load_polygons_from_database(self) -> gpd.GeoDataFrame:
+    def _load_polygons_from_database(self) -> gpd.GeoDataFrame:
         """
         Load polygons directly from the configured PostgreSQL/PostGIS table.
         """
@@ -112,7 +112,7 @@ class InputDatabase:
         Dissolves by 'fire_id' if available to ensure one row per fire.
         """
         try:
-            poly_gdf = self.load_polygons_from_database()
+            poly_gdf = self._load_polygons_from_database()
         except Exception as exc:
             print(f"Error: Failed loading polygons from database: {exc}")
             return None
