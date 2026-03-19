@@ -16,8 +16,12 @@ RUN apt-get update && \
       wget \
       unzip \
       python3-pip \
-      libpq-dev python3-dev \
+      libpq-dev \
+      python3-dev \
+      postgresql-lib \
+      postgresql \
       postgresql-client \
+      proj-bin \
     && apt-get autoclean && \
     apt-get autoremove && \
     rm -rf /var/lib/{apt,dpkg,cache,log}
