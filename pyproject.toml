@@ -217,6 +217,13 @@ package-dir = { "" = "src" }
 packages = ["dea_burn_severity"]
 include-package-data = true
 
+
+[dependency-groups]
+jupyter = [
+    "ipykernel>=7.2.0",
+    "jupyter-client>=8.8.0",
+]
+
 [tool.setuptools.package-data]
 dea_burn_severity = ["config/*.yaml"]
 

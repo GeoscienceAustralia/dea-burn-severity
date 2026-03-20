@@ -50,7 +50,7 @@ class InputDatabase:
 
     def __init__(
         self,
-        *,
+        # *,
         db_host: str | None = burn_config.db_host,
         db_name: str | None = burn_config.db_name,
         db_port: int | None = burn_config.db_port,
@@ -95,8 +95,6 @@ class InputDatabase:
         """
         Load all polygons directly from the configured PostgreSQL/PostGIS table.
         """
-
-        # TODO Do filtering and status checking
 
         select_clause = sql.SQL(", ").join(
             sql.Identifier(col) for col in InputDatabase.DB_COLUMNS
@@ -184,7 +182,7 @@ def perform_pre_filter(poly: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     print(f"After removing small entries: {len(filtered)}")
     
     # Filter out invalid polygons
-    # TODO investigate why there are so many bad ones
+    # TODO investigate why there are so many bad ones?
     filtered = filtered.loc[filtered.geometry.is_valid]
     print(f"After removing invalid entries: {len(filtered)}")
 
@@ -202,7 +200,7 @@ def perform_pre_filter(poly: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
     filtered = filtered[filtered.date_processed <= cutoff_date]
 
-    #make all nan 0 to eliminate cate's date filtering headache!!
+    # Make all nan 0 to eliminate cate's date filtering headache!!
     filtered = filtered.fillna(0)
     
     print(f"After removing fires processed < 65 days ago: {len(filtered)}")
@@ -210,6 +208,7 @@ def perform_pre_filter(poly: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     return filtered
 
 
+# Taken from notebook helper
 def perform_spatial_dissolve(
     poly: pd.DataFrame, id_list: list[str]
 ) -> gpd.GeoDataFrame:
