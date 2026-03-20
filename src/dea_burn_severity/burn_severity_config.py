@@ -2,15 +2,16 @@ import os
 
 # RUNTIME options
 force_rebuild = False
-
-# Static Configuration
-# TODO check this, the helper has Burnt_severity in it.
-dc_app_name = "Burn_Severity"
 output_dir: str = "products"
+dc_app_name = "Burn_Severity"
 upload_to_s3: bool = True
 upload_to_s3_prefix: str | None = (
     "s3://dea-public-data-dev/projects/burn_cube/derivative/dea_burn_severity/result"
 )
+
+
+# Static Configuration
+# TODO check this, the helper has Burnt_severity in it.
 
 resolution = (-10, 10)
 output_crs = "EPSG:3577"
