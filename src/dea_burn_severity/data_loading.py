@@ -10,11 +10,9 @@ import datacube
 import numpy as np
 import xarray as xr
 from datacube.utils.geometry import Geometry
-
 from dea_tools.datahandling import load_ard
 
-from .configuration import RuntimeConfig
-
+import dea_burn_severity.burn_severity_config as burn_config
 
 LOAD_DASK_CHUNKS: dict[str, int] = {"x": 2048, "y": 2048}
 
@@ -37,26 +35,28 @@ def find_latest_valid_pixel(dataset: xr.Dataset) -> xr.Dataset:
     Output: Dataset with same bands, no time dimension.
     """
     # Ensure 'time' is a dimension
-    if 'time' not in dataset.dims:
+    if "time" not in dataset.dims:
         raise ValueError("Dataset must have a 'time' dimension")
 
     # Convert time to numeric for comparison
-    time_numeric = xr.DataArray(dataset['time'].astype('datetime64[ns]').astype(np.int64), dims='time')
+    time_numeric = xr.DataArray(
+        dataset["time"].astype("datetime64[ns]").astype(np.int64), dims="time"
+    )
 
     # Create mask for valid values (non-NaN)
-    valid_mask = ~np.isnan(dataset['nbart_green'])
+    valid_mask = ~np.isnan(dataset["nbart_green"])
 
     # Multiply mask by time to get numeric time where valid, else 0
     valid_times = valid_mask * time_numeric
 
     # Find latest valid time for each pixel
-    latest_valid_time = valid_times.max(dim='time')
+    latest_valid_time = valid_times.max(dim="time")
 
     # Create mask for latest time
     latest_mask = valid_times == latest_valid_time
 
     # Select latest valid values for each band
-    latest_values = dataset.where(latest_mask).max(dim='time')
+    latest_values = dataset.where(latest_mask).max(dim="time")
 
     return latest_values
 
@@ -65,7 +65,6 @@ def load_ard_with_fallback(
     dc: datacube.Datacube,
     gpgon: Geometry,
     time: tuple[str, str],
-    config: RuntimeConfig,
     min_gooddata_thresholds: Iterable[float] = (0.99, 0.90),
     **kwargs,
 ) -> xr.Dataset:
@@ -74,12 +73,12 @@ def load_ard_with_fallback(
     """
     base_params = {
         "dc": dc,
-        "products": config.s2_products,
+        "products": burn_config.s2_products,
         "geopolygon": gpgon,
         "time": time,
-        "measurements": list(config.s2_measurements),
-        "output_crs": config.output_crs,
-        "resolution": config.resolution,
+        "measurements": burn_config.s2_measurements,
+        "output_crs": burn_config.output_crs,
+        "resolution": burn_config.resolution,
         "group_by": "solar_day",
         "cloud_mask": "s2cloudless",
         "dask_chunks": LOAD_DASK_CHUNKS,
@@ -104,7 +103,7 @@ def load_ard_with_fallback(
 
 
 def load_baseline_stack(
-    dc: datacube.Datacube, gpgon: Geometry, time: tuple[str, str], config: RuntimeConfig
+    dc: datacube.Datacube, gpgon: Geometry, time: tuple[str, str]
 ) -> tuple[xr.Dataset, xr.Dataset | None]:
     """
     Load baseline ARD with strict cloud limits, then fall back to a relaxed
@@ -112,12 +111,12 @@ def load_baseline_stack(
     """
     base_params = {
         "dc": dc,
-        "products": config.s2_products,
+        "products": burn_config.s2_products,
         "geopolygon": gpgon,
         "time": time,
-        "measurements": list(config.s2_measurements),
-        "output_crs": config.output_crs,
-        "resolution": config.resolution,
+        "measurements": list(burn_config.s2_measurements),
+        "output_crs": burn_config.output_crs,
+        "resolution": burn_config.resolution,
         "group_by": "solar_day",
         "cloud_mask": "s2cloudless",
         "dask_chunks": LOAD_DASK_CHUNKS,
@@ -140,11 +139,3 @@ def load_baseline_stack(
 
     composite = find_latest_valid_pixel(baseline)
     return baseline, composite
-
-
-__all__ = [
-    "LOAD_DASK_CHUNKS",
-    "find_latest_valid_pixel",
-    "load_ard_with_fallback",
-    "load_baseline_stack",
-]
