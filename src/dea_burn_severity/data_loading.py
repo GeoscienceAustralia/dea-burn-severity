@@ -12,7 +12,7 @@ import xarray as xr
 from datacube.utils.geometry import Geometry
 from dea_tools.datahandling import load_ard
 
-import dea_burn_severity.burn_severity_config as burn_config
+from dea_burn_severity.burn_severity_config import StaticBurnConfig
 
 LOAD_DASK_CHUNKS: dict[str, int] = {"x": 2048, "y": 2048}
 
@@ -73,12 +73,12 @@ def load_ard_with_fallback(
     """
     base_params = {
         "dc": dc,
-        "products": burn_config.s2_products,
+        "products": StaticBurnConfig.s2_products,
         "geopolygon": gpgon,
         "time": time,
-        "measurements": burn_config.s2_measurements,
-        "output_crs": burn_config.output_crs,
-        "resolution": burn_config.resolution,
+        "measurements": StaticBurnConfig.s2_measurements,
+        "output_crs": StaticBurnConfig.output_crs,
+        "resolution": StaticBurnConfig.resolution,
         "group_by": "solar_day",
         "cloud_mask": "s2cloudless",
         "dask_chunks": LOAD_DASK_CHUNKS,
@@ -111,12 +111,12 @@ def load_baseline_stack(
     """
     base_params = {
         "dc": dc,
-        "products": burn_config.s2_products,
+        "products": StaticBurnConfig.s2_products,
         "geopolygon": gpgon,
         "time": time,
-        "measurements": list(burn_config.s2_measurements),
-        "output_crs": burn_config.output_crs,
-        "resolution": burn_config.resolution,
+        "measurements": list(StaticBurnConfig.s2_measurements),
+        "output_crs": StaticBurnConfig.output_crs,
+        "resolution": StaticBurnConfig.resolution,
         "group_by": "solar_day",
         "cloud_mask": "s2cloudless",
         "dask_chunks": LOAD_DASK_CHUNKS,

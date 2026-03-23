@@ -15,7 +15,7 @@ from psycopg2 import sql
 from psycopg2.extensions import connection
 from shapely.geometry import shape
 
-import dea_burn_severity.burn_severity_config as burn_config
+from dea_burn_severity.burn_severity_config import RuntimeBurnConfig
 
 
 class InputDatabase:
@@ -38,6 +38,44 @@ class InputDatabase:
 
     DB_GEO_COLUMN = "geom"
     DB_OUTPUT_CRS: str = "EPSG:4283"
+    
+    ATTRIBUTE_COPY_RULES: tuple[dict[str, Any], ...] = (
+    {"target": "fire_id", "sources": ("fire_id",), "date": False},
+    {"target": "fire_name", "sources": ("fire_name",), "date": False},
+    {"target": "fire_type", "sources": ("fire_type",), "date": False},
+    {
+        "target": "ignition_date",
+        "sources": ("ignition_date", "ignition_d"),
+        "date": True,
+    },
+    {
+        "target": "capt_date",
+        "sources": ("capt_date", "capture_date", "capture_da"),
+        "date": True,
+    },
+    {"target": "capt_method", "sources": ("capt_method", "capt_metho"), "date": False},
+    {"target": "area_ha", "sources": ("area_ha",), "date": False},
+    {"target": "perim_km", "sources": ("perim_km",), "date": False},
+    {"target": "state", "sources": ("state",), "date": False},
+    {"target": "agency", "sources": ("agency",), "date": False},
+    {
+        "target": "date_retrieved",
+        "sources": ("date_retrieved", "date_retri"),
+        "date": True,
+    },
+    {
+        "target": "date_processed",
+        "sources": ("date_processed", "date_proce"),
+        "date": True,
+    },
+    {
+        "target": "extinguish_date",
+        "sources": ("extinguish_date",),
+        "date": True,
+    },
+)
+
+    FIRE_ID_FIELDS: tuple[str, ...] = ("fire_id",)
 
     def _get_conn(self) -> connection:
         return psycopg2.connect(
@@ -50,45 +88,40 @@ class InputDatabase:
 
     def __init__(
         self,
-        # *,
-        db_host: str | None = burn_config.db_host,
-        db_name: str | None = burn_config.db_name,
-        db_port: int | None = burn_config.db_port,
-        db_user: str | None = burn_config.db_user,
-        db_password: str | None = burn_config.db_password,
+        config: RuntimeBurnConfig
     ) -> None:
 
         # Anything not passed through will be loaded from the env. Anything missing at this stage will
         # cause issues so will throw errors.
 
-        if not db_host:
+        if not config.db_host:
             raise ValueError(
                 "Configuration 'db_host' must be provided for database polygon loading."
             )
-        if not db_name:
+        if not config.db_name:
             raise ValueError(
                 "Configuration 'db_name' must be provided for database polygon loading."
             )
-        if not db_port:
+        if not config.db_port:
             raise ValueError(
                 "Configuration 'db_port' must be provided for database polygon loading."
             )
-        if not db_user:
+        if not config.db_user:
             raise ValueError(
                 "Configuration 'db_user' must be provided for database polygon loading."
             )
-        if not db_password:
+        if not config.db_password:
             raise ValueError(
                 "Configuration 'db_password' must be provided for database polygon loading."
             )
 
-        self.db_host = db_host
-        self.db_name = db_name
-        self.db_port = db_port
-        self.db_user = db_user
-        self.db_password = db_password
+        self.db_host = config.db_host
+        self.db_name = config.db_name
+        self.db_port = config.db_port
+        self.db_user = config.db_user
+        self.db_password = config.db_password
         self.table_identifier = sql.Identifier(
-            InputDatabase.DB_SCHEMA, burn_config.db_table
+            InputDatabase.DB_SCHEMA, config.db_table
         )
 
     def load_polygons_from_database(self) -> gpd.GeoDataFrame:
@@ -145,7 +178,7 @@ class InputDatabase:
 
         return gpd.GeoDataFrame(records, crs=InputDatabase.DB_OUTPUT_CRS)
 
-    def load_and_prepare_polygons(self) -> gpd.GeoDataFrame | None:
+    def load_filtered_polygons(self) -> gpd.GeoDataFrame | None:
         """
         Loads fire polygons from the configured database and prepares them for processing.
         Dissolves by 'fire_id' if available to ensure one row per fire.
@@ -161,6 +194,7 @@ class InputDatabase:
         return perform_pre_filter(poly_gdf)
 
 
+# TODO add optional args to override the params
 def perform_pre_filter(poly: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
     Filter results.
