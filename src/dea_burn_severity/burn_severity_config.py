@@ -10,6 +10,7 @@ class RuntimeBurnConfig:
     upload_to_s3: bool = False
     upload_to_s3_prefix: str = "s3://dea-public-data-dev/projects/burn_cube/derivative/dea_burn_severity/result"
 
+    fire_area_minimum_ha: int = 1
     pre_fire_buffer_days: int = 50
     post_fire_window_days: int = 60
     post_fire_start_days: int = 15

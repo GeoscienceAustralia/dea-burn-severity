@@ -115,6 +115,7 @@ class InputDatabase:
                 "Configuration 'db_password' must be provided for database polygon loading."
             )
 
+        self.burn_config = config
         self.db_host = config.db_host
         self.db_name = config.db_name
         self.db_port = config.db_port
@@ -191,55 +192,54 @@ class InputDatabase:
             return None
 
         # Run pre-filtering
-        return perform_pre_filter(poly_gdf)
+        return self.perform_pre_filter(poly_gdf)
 
 
-# TODO add optional args to override the params
-def perform_pre_filter(poly: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """
-    Filter results.
+    def perform_pre_filter(self, poly: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+        """
+        Filter results.
 
-    Does the following:
-        - Remove any that have area < 1ha
-        - Removes any entries with invalid geometry
-        - For all sets of fire_id (entries with the same id)
-            - Find overlapping polygons
-            - Create a single merged polygon for all entries
-        - Removes any entries that are less than 65 days old
-    """
+        Does the following:
+            - Remove any that have area < 1ha
+            - Removes any entries with invalid geometry
+            - For all sets of fire_id (entries with the same id)
+                - Find overlapping polygons
+                - Create a single merged polygon for all entries
+            - Removes any entries that are less than 65 days old
+        """
 
-    # filter on size
-    # TODO mark everything filtered out of here as a "won't do" with the right reason.
-    print(f"Started with: {len(poly)}")
-    
-    filtered = poly.drop(poly[poly.area_ha < 1].index)
-    print(f"After removing small entries: {len(filtered)}")
-    
-    # Filter out invalid polygons
-    # TODO investigate why there are so many bad ones?
-    filtered = filtered.loc[filtered.geometry.is_valid]
-    print(f"After removing invalid entries: {len(filtered)}")
+        # filter on size
+        # TODO mark everything filtered out of here as a "won't do" with the right reason.
+        print(f"Started with: {len(poly)}")
+        
+        filtered = poly.drop(poly[poly.area_ha < self.burn_config.fire_area_minimum_ha].index)
+        print(f"After removing small entries: {len(filtered)}")
+        
+        # Filter out invalid polygons
+        # TODO investigate why there are so many bad ones?
+        filtered = filtered.loc[filtered.geometry.is_valid]
+        print(f"After removing invalid entries: {len(filtered)}")
 
-    unique_fire_ids = list(set(filtered["fire_id"]))
+        unique_fire_ids = list(set(filtered["fire_id"]))
 
-    # TODO we need to capture the ones that got dropped so we can mark them as won't do
-    filtered = perform_spatial_dissolve(filtered, unique_fire_ids)
+        # TODO we need to capture the ones that got dropped so we can mark them as won't do
+        filtered = perform_spatial_dissolve(filtered, unique_fire_ids)
 
-    print(f"After dissolving overlapping entries: {len(filtered)}")
+        print(f"After dissolving overlapping entries: {len(filtered)}")
 
-    # Age filtering
-    today_date = date.today()
+        # Age filtering
+        today_date = date.today()
 
-    cutoff_date = today_date - timedelta(days=65)
+        cutoff_date = today_date - timedelta(days=self.burn_config.post_fire_window_days)
 
-    filtered = filtered[filtered.date_processed <= cutoff_date]
+        filtered = filtered[filtered.date_processed <= cutoff_date]
 
-    # Make all nan 0 to eliminate cate's date filtering headache!!
-    filtered = filtered.fillna(0)
-    
-    print(f"After removing fires processed < 65 days ago: {len(filtered)}")
+        # Make all nan 0 to eliminate cate's date filtering headache!!
+        filtered = filtered.fillna(0)
+        
+        print(f"After removing fires processed < {self.burn_config.post_fire_window_days} days ago: {len(filtered)}")
 
-    return filtered
+        return filtered
 
 
 # Taken from notebook helper
