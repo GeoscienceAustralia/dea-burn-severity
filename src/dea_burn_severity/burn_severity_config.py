@@ -15,12 +15,13 @@ class RuntimeBurnConfig:
     post_fire_window_days: int = 60
     post_fire_start_days: int = 15
 
-    # Env vars
+    # Env var loaded - used by pipeline
     db_host: str | None = os.getenv("FIRE_DB_HOSTNAME")
-    db_name: str | None = os.getenv("FIRE_DB_NAME")
     db_password: str | None = os.getenv("FIRE_DB_PASSWORD")
     db_user: str | None = os.getenv("FIRE_DB_USERNAME")
-    db_port: int | None = int(os.getenv("DB_PORT", 0))
+    
+    db_name: str | None = os.getenv("FIRE_DB_NAME", "fire_severity_product")
+    db_port: int | None = int(os.getenv("DB_PORT", 5432))
 
     db_table: str = "nli_lastboundaries_trigger"
 

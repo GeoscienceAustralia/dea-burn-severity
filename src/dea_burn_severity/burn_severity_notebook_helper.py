@@ -17,7 +17,7 @@ from dea_tools.bandindices import calculate_indices
 from dea_tools.datahandling import load_ard
 from dea_tools.spatial import xr_vectorize
 
-dc = datacube.Datacube(app="Burnt_severity")
+dc = datacube.Datacube(app="Burn_severity")
 
 attribute_mapping = {'ignition_d': 'ignition_date',
                     'capt_metho': 'capt_method',

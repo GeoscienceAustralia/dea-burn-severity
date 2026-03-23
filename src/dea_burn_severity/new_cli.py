@@ -15,3 +15,5 @@ def cli() -> None:
     
     burn_processing = BurnSeverityProcessor(config)
     burn_processing.process_all_polygons(polygons)
+
+

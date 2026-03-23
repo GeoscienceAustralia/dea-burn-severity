@@ -93,7 +93,6 @@ class InputDatabase:
 
         # Anything not passed through will be loaded from the env. Anything missing at this stage will
         # cause issues so will throw errors.
-
         if not config.db_host:
             raise ValueError(
                 "Configuration 'db_host' must be provided for database polygon loading."
@@ -213,7 +212,7 @@ class InputDatabase:
         print(f"Started with: {len(poly)}")
         
         filtered = poly.drop(poly[poly.area_ha < self.burn_config.fire_area_minimum_ha].index)
-        print(f"After removing small entries: {len(filtered)}")
+        print(f"After removing small entries (<{self.burn_config.fire_area_minimum_ha}ha): {len(filtered)}")
         
         # Filter out invalid polygons
         # TODO investigate why there are so many bad ones?
@@ -237,7 +236,7 @@ class InputDatabase:
         # Make all nan 0 to eliminate cate's date filtering headache!!
         filtered = filtered.fillna(0)
         
-        print(f"After removing fires processed < {self.burn_config.post_fire_window_days} days ago: {len(filtered)}")
+        print(f"After removing fires processed <{self.burn_config.post_fire_window_days} days ago: {len(filtered)}")
 
         return filtered
 
