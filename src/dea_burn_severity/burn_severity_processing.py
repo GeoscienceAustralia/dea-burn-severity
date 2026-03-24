@@ -50,6 +50,7 @@ class BurnSeverityProcessor:
 
         attributes = self._extract_attribute_values(fire_series)
 
+        # TODO need to clean up ids and dates, they are all over the place between both of them.
         fire_id = attributes.get("fire_id")
         fire_name_value = attributes.get("fire_name")
         fire_slug = unique_fire_name
@@ -68,7 +69,7 @@ class BurnSeverityProcessor:
                 f"Could not determine ignition date for fire '{fire_display_name}'."
             )
 
-        extinguish_date_value = attributes.get("date_retrieved") or attributes.get(
+        extinguish_date_value: Any | None = attributes.get("date_retrieved") or attributes.get(
             "extinguish_date"
         )
         extinguish_date = extinguish_date_value if extinguish_date_value else "None"
@@ -95,6 +96,11 @@ class BurnSeverityProcessor:
         ).strftime("%Y-%m-%d")
 
         landcover_year = str(int(fire_date[0:4]) - 1)
+        
+        # add in saftynet for landcover when new year starts. remove when 2025 landcover is published
+        # TODO Cate - review this, it wasn't in the old code
+        if int(landcover_year) > 2024:
+            landcover_year = '2024'
 
         baseline, closest_bl = load_baseline_stack(
             dc, gpgon, time=(start_date_pre, end_date_pre)
