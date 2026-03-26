@@ -3,9 +3,9 @@ Database access helpers for burn severity processing.
 """
 
 from __future__ import annotations
-from datetime import date, timedelta
 
 import json
+from datetime import date, timedelta
 from typing import Any
 
 import geopandas as gpd
@@ -18,10 +18,98 @@ from shapely.geometry import shape
 from dea_burn_severity.burn_severity_config import RuntimeBurnConfig
 
 
+class JobStatusTable:
+    """Class for interfacing with the job database. Requires a write connection to function correctly."""
+
+    """Creation of this database can be done with the following SQL snippet. This will always be performed manually so
+    python code will not be provided.
+    
+    ALTER TABLE nli_lastboundaries_trigger ADD CONSTRAINT unique_uid UNIQUE (uid);
+
+    CREATE TABLE processing_status (
+        trigger_uid integer PRIMARY KEY
+            REFERENCES nli_lastboundaries_trigger(uid)
+            ON DELETE CASCADE,
+
+        status text NOT NULL,
+            
+        lastmod timestamptz NOT NULL DEFAULT now(),
+
+        message text
+    );
+    
+    GRANT SELECT, INSERT, UPDATE, DELETE ON processing_status TO pipeline_user;
+    
+    ---
+    Valid status values:
+        - UNPROCESSED (new, not ready)
+        - COMPLETE
+        - SKIPPED (invalid, merged) TODO do we want to split this into distinct things so we can tell what is actually busted vs merged?
+    """
+
+    def __init__(self, db: InputDatabase):
+        self.db = db
+        self.status_table_identifier = sql.Identifier(
+            InputDatabase.DB_SCHEMA, db.burn_config.db_status_table
+        )
+
+    def update_available_jobs(self):
+        """Find any new entries from the trigger table that have not got a status associated and add them as pending."""
+        with self.db._get_conn() as con, con.cursor() as cursor:
+            cursor.execute(
+                sql.SQL(
+                    """
+                    INSERT INTO {status_table} (trigger_uid, status, lastmod, message)
+                    SELECT t.uid, 'UNPROCESSED', now(), NULL
+                    FROM {trigger_table} t
+                    WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM {status_table} js
+                    WHERE js.trigger_uid = t.uid
+                    );
+                """
+                ).format(
+                    trigger_table=self.db.table_identifier,
+                    status_table=self.status_table_identifier,
+                )
+            )
+
+    # TODO make this take a batch
+    def set_job_status(self, uid: int, status: str, message: str | None):
+        """Set the status and message for a job."""
+
+        if not self.db.burn_config.db_use_status_table:
+            return
+
+        with self.db._get_conn() as con, con.cursor() as cursor:
+            cursor.execute(
+                sql.SQL(
+                    """
+                    UPDATE {status_table}
+                    SET status  = {status},
+                        message = {message},
+                        lastmod = now()
+                    WHERE trigger_uid = $1;
+
+                """
+                ).format(
+                    status_table=self.status_table_identifier,
+                    status=sql.Literal(status),
+                    message=sql.Literal(message),
+                )
+            )
+
+    def report_status(self):
+        """Return a textual report with stats on what the current state of the system is."""
+        # TODO implement
+        pass
+
+
 class InputDatabase:
     DB_SCHEMA = "public"
 
     DB_COLUMNS = [
+        "uid",
         "fire_id",
         "fire_name",
         "fire_type",
@@ -38,42 +126,46 @@ class InputDatabase:
 
     DB_GEO_COLUMN = "geom"
     DB_OUTPUT_CRS: str = "EPSG:4283"
-    
+
     ATTRIBUTE_COPY_RULES: tuple[dict[str, Any], ...] = (
-    {"target": "fire_id", "sources": ("fire_id",), "date": False},
-    {"target": "fire_name", "sources": ("fire_name",), "date": False},
-    {"target": "fire_type", "sources": ("fire_type",), "date": False},
-    {
-        "target": "ignition_date",
-        "sources": ("ignition_date", "ignition_d"),
-        "date": True,
-    },
-    {
-        "target": "capt_date",
-        "sources": ("capt_date", "capture_date", "capture_da"),
-        "date": True,
-    },
-    {"target": "capt_method", "sources": ("capt_method", "capt_metho"), "date": False},
-    {"target": "area_ha", "sources": ("area_ha",), "date": False},
-    {"target": "perim_km", "sources": ("perim_km",), "date": False},
-    {"target": "state", "sources": ("state",), "date": False},
-    {"target": "agency", "sources": ("agency",), "date": False},
-    {
-        "target": "date_retrieved",
-        "sources": ("date_retrieved", "date_retri"),
-        "date": True,
-    },
-    {
-        "target": "date_processed",
-        "sources": ("date_processed", "date_proce"),
-        "date": True,
-    },
-    {
-        "target": "extinguish_date",
-        "sources": ("extinguish_date",),
-        "date": True,
-    },
-)
+        {"target": "fire_id", "sources": ("fire_id",), "date": False},
+        {"target": "fire_name", "sources": ("fire_name",), "date": False},
+        {"target": "fire_type", "sources": ("fire_type",), "date": False},
+        {
+            "target": "ignition_date",
+            "sources": ("ignition_date", "ignition_d"),
+            "date": True,
+        },
+        {
+            "target": "capt_date",
+            "sources": ("capt_date", "capture_date", "capture_da"),
+            "date": True,
+        },
+        {
+            "target": "capt_method",
+            "sources": ("capt_method", "capt_metho"),
+            "date": False,
+        },
+        {"target": "area_ha", "sources": ("area_ha",), "date": False},
+        {"target": "perim_km", "sources": ("perim_km",), "date": False},
+        {"target": "state", "sources": ("state",), "date": False},
+        {"target": "agency", "sources": ("agency",), "date": False},
+        {
+            "target": "date_retrieved",
+            "sources": ("date_retrieved", "date_retri"),
+            "date": True,
+        },
+        {
+            "target": "date_processed",
+            "sources": ("date_processed", "date_proce"),
+            "date": True,
+        },
+        {
+            "target": "extinguish_date",
+            "sources": ("extinguish_date",),
+            "date": True,
+        },
+    )
 
     FIRE_ID_FIELDS: tuple[str, ...] = ("fire_id",)
 
@@ -86,10 +178,7 @@ class InputDatabase:
             password=self.db_password,
         )
 
-    def __init__(
-        self,
-        config: RuntimeBurnConfig
-    ) -> None:
+    def __init__(self, config: RuntimeBurnConfig) -> None:
 
         # Anything not passed through will be loaded from the env. Anything missing at this stage will
         # cause issues so will throw errors.
@@ -120,46 +209,62 @@ class InputDatabase:
         self.db_port = config.db_port
         self.db_user = config.db_user
         self.db_password = config.db_password
-        self.table_identifier = sql.Identifier(
-            InputDatabase.DB_SCHEMA, config.db_table
-        )
+        self.table_identifier = sql.Identifier(InputDatabase.DB_SCHEMA, config.db_table)
+        self.job_status_table = JobStatusTable(self)
+        self.db_use_status_table = config.db_use_status_table
 
     def load_polygons_from_database(self) -> gpd.GeoDataFrame:
         """
         Load all polygons directly from the configured PostgreSQL/PostGIS table.
         """
+        if self.db_use_status_table:
+            self.job_status_table.update_available_jobs()
+
+            where_clause = sql.SQL("""
+                JOIN {status_table} js ON js.trigger_uid = t.uid
+                WHERE js.status = 'UNPROCESSED';""").format(
+                status_table=self.job_status_table.status_table_identifier
+            )
+        else:
+            where_clause = sql.SQL("")
 
         select_clause = sql.SQL(", ").join(
             sql.Identifier(col) for col in InputDatabase.DB_COLUMNS
         )
+
         query = sql.SQL(
-            "SELECT {fields}, ST_AsGeoJSON({geom}) AS geom_geojson FROM {table}"
+            "SELECT {fields}, ST_AsGeoJSON({geom}) AS geom_geojson FROM {table} t {where_clause}"
         ).format(
             fields=select_clause,
             geom=sql.Identifier(InputDatabase.DB_GEO_COLUMN),
             table=self.table_identifier,
+            where_clause=where_clause,
         )
 
         print(f"Querying polygons from table '{self.table_identifier}'...")
         records: list[dict[str, Any]] = []
-        failures = 0
 
         with self._get_conn() as con, con.cursor() as cursor:
             cursor.execute(query)
             rows = cursor.fetchall()
             print(f"Retrieved {len(rows)} rows from database.")
+
+            failed_geo = []
             # TODO can we parse on get instead of this?
-            for idx, row in enumerate(rows):
+            for row in rows:
                 attr_values = row[:-1]
                 geom_raw = row[-1]
+                row_id = row[0]
                 try:
                     json_start = geom_raw.find("{")
                     geom_str = geom_raw[json_start:] if json_start >= 0 else geom_raw
                     geom_mapping = json.loads(geom_str)
                     geom_obj = shape(geom_mapping)
                 except Exception as exc:
-                    failures += 1
-                    print(f"Warning: Failed to parse geometry for row {idx}: {exc}")
+                    failed_geo.append(row_id)
+                    print(
+                        f"Warning: Failed to parse geometry for row with id {row_id}: {exc}"
+                    )
                     continue
 
                 record = {
@@ -168,8 +273,12 @@ class InputDatabase:
                 record["geometry"] = geom_obj
                 records.append(record)
 
-        if failures:
-            print(f"Skipped {failures} rows due to geometry parsing errors.")
+        if len(failed_geo) > 0:
+            print(f"Skipped {len(failed_geo)} rows due to geometry parsing errors.")
+            for uid in failed_geo:
+                self.job_status_table.set_job_status(
+                    uid, "SKIPPED", "Unparsable geometry"
+                )
         if not records:
             return gpd.GeoDataFrame(
                 columns=[*InputDatabase.DB_COLUMNS, "geometry"],
@@ -193,7 +302,6 @@ class InputDatabase:
         # Run pre-filtering
         return self.perform_pre_filter(poly_gdf)
 
-
     def perform_pre_filter(self, poly: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         """
         Filter results.
@@ -206,37 +314,72 @@ class InputDatabase:
                 - Create a single merged polygon for all entries
             - Removes any entries that are less than 65 days old
         """
-
+        removed_entries = []
         # filter on size
         # TODO mark everything filtered out of here as a "won't do" with the right reason.
         print(f"Started with: {len(poly)}")
-        
-        filtered = poly.drop(poly[poly.area_ha < self.burn_config.fire_area_minimum_ha].index)
-        print(f"After removing small entries (<{self.burn_config.fire_area_minimum_ha}ha): {len(filtered)}")
-        
+
+        small_entries = poly[poly.area_ha < self.burn_config.fire_area_minimum_ha]
+        removed_entries.append(
+            (
+                small_entries.uid.tolist(),
+                "SKIPPED",
+                f"Area smaller than {self.burn_config.fire_area_minimum_ha}",
+            )
+        )
+
+        filtered = poly.drop(small_entries.index)
+        print(
+            f"After removing small entries (<{self.burn_config.fire_area_minimum_ha}ha): {len(filtered)}"
+        )
+
         # Filter out invalid polygons
         # TODO investigate why there are so many bad ones?
+        removed_entries.append(
+            (
+                filtered.loc[~filtered.geometry.is_valid].uid.tolist(),
+                "SKIPPED",
+                "Invalid geometry",
+            )
+        )
         filtered = filtered.loc[filtered.geometry.is_valid]
         print(f"After removing invalid entries: {len(filtered)}")
 
         unique_fire_ids = list(set(filtered["fire_id"]))
 
         # TODO we need to capture the ones that got dropped so we can mark them as won't do
-        filtered = perform_spatial_dissolve(filtered, unique_fire_ids)
-
+        filtered, dissolved_entries = perform_spatial_dissolve(
+            filtered, unique_fire_ids
+        )
+        removed_entries.append(dissolved_entries)
         print(f"After dissolving overlapping entries: {len(filtered)}")
 
         # Age filtering
         today_date = date.today()
 
-        cutoff_date = today_date - timedelta(days=self.burn_config.post_fire_window_days)
+        cutoff_date = today_date - timedelta(
+            days=self.burn_config.post_fire_window_days
+        )
 
+        removed_entries.append(
+            (
+                filtered[~(filtered.date_processed <= cutoff_date)].uid.tolist(),
+                "UNPROCESSED",
+                "Too new",
+            )
+        )
         filtered = filtered[filtered.date_processed <= cutoff_date]
 
         # Make all nan 0 to eliminate cate's date filtering headache!!
         filtered = filtered.fillna(0)
+
+        print(
+            f"After removing fires processed <{self.burn_config.post_fire_window_days} days ago: {len(filtered)}"
+        )
         
-        print(f"After removing fires processed <{self.burn_config.post_fire_window_days} days ago: {len(filtered)}")
+        # TODO implement
+        # self.job_status_table.set_job_status(removed_entries)
+            
 
         return filtered
 
@@ -244,19 +387,21 @@ class InputDatabase:
 # Taken from notebook helper
 def perform_spatial_dissolve(
     poly: pd.DataFrame, id_list: list[str]
-) -> gpd.GeoDataFrame:
+) -> tuple[gpd.GeoDataFrame, list[tuple[list[int], str]]]:
     """takes a list of ids and the corrosponding geopandas dataframe and checks for spatial overlap
     to see if polygons are actually the same fire or not"""
 
     geom_to_process = []
+
+    removed_entries = []
 
     for fire in id_list:
         subset: pd.DataFrame = poly[poly["fire_id"] == fire].copy()
 
         # Find largest
         area_list = subset["area_ha"].unique()
-        largest = subset[subset["area_ha"] == area_list.max()]
-        largest_dc = largest.geometry.iloc[0]
+        largest = subset[subset["area_ha"] == area_list.max()].iloc[0]
+        largest_dc = largest.geometry
 
         # Check overlaps
         do_they_overlap = subset.geometry.intersects(largest_dc)
@@ -271,6 +416,14 @@ def perform_spatial_dissolve(
         # Overlapping shapes dissolved
         non_unique_shapes = subset[do_they_overlap]
 
+        # Track the dissolved uids. Remove the uid of the new "parent" entry.
+        dissolved_uids = non_unique_shapes.uid.tolist()
+        dissolved_uids.remove(largest.uid)
+        if len(dissolved_uids) > 0:
+            removed_entries.append(
+                (dissolved_uids, "SKIPPED", f"Dissolved into {largest.uid}")
+            )
+
         agg = {
             col: "first"
             for col in subset.columns
@@ -282,4 +435,6 @@ def perform_spatial_dissolve(
 
         combine_to_one = non_unique_shapes.dissolve(aggfunc=agg)
         geom_to_process.append(combine_to_one)
-    return gpd.GeoDataFrame(pd.concat(geom_to_process, ignore_index=True), crs=poly.crs)
+    return gpd.GeoDataFrame(
+        pd.concat(geom_to_process, ignore_index=True), crs=poly.crs
+    ), removed_entries

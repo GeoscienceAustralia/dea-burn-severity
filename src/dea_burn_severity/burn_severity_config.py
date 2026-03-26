@@ -25,6 +25,10 @@ class RuntimeBurnConfig:
     db_port: int | None = int(os.getenv("DB_PORT", 5432))
 
     db_table: str = "nli_lastboundaries_trigger"
+    db_status_table: str = "processing_status"
+    
+    # Set to true to update the status table and use it for filtering.
+    db_use_status_table: bool = False
 
 
 class StaticBurnConfig:

@@ -446,7 +446,7 @@ def main(config: RuntimeConfig | None = None) -> None:
     dc = datacube.Datacube(app=runtime.app_name)
     
     input_db = InputDatabase(runtime)
-    all_polys = input_db.load_and_prepare_polygons()
+    all_polys = input_db.load_filtered_polygons()
     if all_polys is None or all_polys.empty:
         print("No polygons loaded. Exiting.")
         return
