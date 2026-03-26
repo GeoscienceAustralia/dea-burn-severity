@@ -280,8 +280,8 @@ class BurnSeverityProcessor:
             final_severity,
             attribute_col="severity_rating",
             crs=StaticBurnConfig.output_crs,
-            mask=final_severity != 0,
         )
+        #remove mask by 0, we actually want to vectorise all values even 0
         if severity_vectors.empty:
             print("No burn area detected for this fire.")
             return None
