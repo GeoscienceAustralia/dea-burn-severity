@@ -53,7 +53,8 @@ output_crs = 'EPSG:3577'
 
 
 
-def find_latest_valid_pixel(dataset):
+# DO NOT USE - this matches find_latest_valid_pixel() in data_loading.py
+def _old__find_latest_valid_pixel(dataset):
     """
     For a multi-temporal xarray Dataset (masked for clouds/contiguity),
     return the latest clear value for each pixel across all bands.
@@ -120,7 +121,8 @@ def is_date_DEA_format(date_str):
         return False
 
 
-def process_date(date):
+# DO NOT USE - this matches _process_date() in burn_severity_processing.py
+def _old__process_date(date):
     """check the format for a date is as desiered 'yyyy-MM-ddTHH:mm:ss.sZ ', If it is not then format assuming it's 
     a valid date either as YYYY-MM-DD, YYYYMMDD or YYYYMMDDhhmmss and format as above (assume the time is noon if no time is given)
 
@@ -157,6 +159,8 @@ def process_date(date):
         except ValueError:
             return
 
+# Keep, notebook use only?
+# TODO Cate - does this provide any value any more?
 def test_polygon_attributes(polygon):
 
     if list(polygon)[3] == 'ignition_d':
@@ -169,6 +173,7 @@ def test_polygon_attributes(polygon):
         print('attibutes are long, no need to change')
         return polygon
 
+# Keep, notebook use only?
 def display_geometry_on_map(geom, zoom_bias=0):
     """
     Plots a datacube.utils.geometry.Geometry object on a folium map.
@@ -227,7 +232,8 @@ def display_geometry_on_map(geom, zoom_bias=0):
 
     return m
 
-def load_polygons_from_database(user, password, db_table, db_columns=[], db_geom_column = 'geom',
+# DO NOT USE - database.py InputDatabase().load_polygons_from_database() should be used instead.
+def _old__load_polygons_from_database(user, password, db_table, db_columns=[], db_geom_column = 'geom',
                                 db_output_crs = 'EPSG:4283', DB_SCHEMA = "public") -> gpd.GeoDataFrame:
     """
     Load polygons directly from the configured PostgreSQL/PostGIS table.
@@ -302,9 +308,8 @@ def load_polygons_from_database(user, password, db_table, db_columns=[], db_geom
 
     return gpd.GeoDataFrame(records, crs=db_output_crs)
 
-
-
-def perform_spatial_dissolve(poly, id_list) -> gpd.GeoDataFrame:
+# DO NOT USE - database.py InputDatabase().perform_spatial_dissolve should be used instead
+def _old__perform_spatial_dissolve(poly, id_list) -> gpd.GeoDataFrame:
     """takes a list of ids and the corrosponding geopandas dataframe and checks for spatial overlap 
     to see if polygons are actually the same fire or not"""
 
@@ -337,7 +342,10 @@ def perform_spatial_dissolve(poly, id_list) -> gpd.GeoDataFrame:
         geom_to_process.append(combine_to_one)
     return gpd.GeoDataFrame(pd.concat(geom_to_process, ignore_index=True), crs=poly.crs)
 
-def map_burn_severity(random_fire):
+# DO NOT USE - burn_severity_processing.py BurnSeverityProcessor().process_single_fire should be used instead
+# TODO Cate - this might need some review, the original implementation by Sai is a bit different.
+# I have not verified the functional differences if this has updated since it was copied over.
+def _old__map_burn_severity(random_fire):
 
     print('CONDUCTING BURN SEVERITY MAPPING', random_fire)
         
