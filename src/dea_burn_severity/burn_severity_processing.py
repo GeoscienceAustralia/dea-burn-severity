@@ -319,7 +319,7 @@ class BurnSeverityProcessor:
         )
 
         for key, value in attributes.items():
-            if key in {"fire_id", "fire_name", "ignition_date", "extinguish_date"}:
+            if key in {"fire_id", "fire_name", "ignition_date", "extinguish_date", "area_ha", "perim_km"}:
                 continue
             aggregated[key] = value
 
