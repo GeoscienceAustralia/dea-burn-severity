@@ -307,7 +307,7 @@ class BurnSeverityProcessor:
         aggregated['severity_class'] = aggregated['severity_rating'].map(StaticBurnConfig.severity_class_name)
     
         #add our assumed extinguish date to shapefile
-        aggrigated_severity['extinguish_date'] = extinguish_date
+        aggregated['extinguish_date'] = extinguish_date
 
         if fire_id is not None:
             aggregated["fire_id"] = fire_id
