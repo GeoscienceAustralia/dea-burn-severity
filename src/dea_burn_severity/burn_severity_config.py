@@ -12,6 +12,7 @@ class RuntimeBurnConfig:
 
     fire_area_minimum_ha: int = 1
     pre_fire_buffer_days: int = 50
+    adjustment_missing_ignit_date: int = 30
     post_fire_window_days: int = 60
     post_fire_start_days: int = 15
 
@@ -86,3 +87,12 @@ class StaticBurnConfig:
         96,
         97,
     ]
+
+    severity_class_name: dict[int: str] =
+        {0 : 'Unburnt',
+        1 : 'Grass_extent',
+        2 : 'Low',
+        3 : 'Medium',
+        4 : 'High',
+        5 : 'Extreme',
+        6 : 'No_data'}

@@ -37,8 +37,8 @@ class BurnSeverityProcessor:
         """
         Full burn mapping workflow for a single fire polygon.
         Returns:
-            GeoDataFrame dissolved by 'severity' (with 'severity' column),
-            reprojected to 'EPSG:4283', or None if nothing to save.
+            GeoDataFrame dissolved by 'severity_rating' (with 'severity_rating' column),
+            reprojected to 'EPSG:3577', or None if nothing to save.
         """
 
         os.environ["AWS_NO_SIGN_REQUEST"] = "Yes"
@@ -46,7 +46,10 @@ class BurnSeverityProcessor:
         gpgon = Geometry(fire_series.geometry, crs=poly_crs)
 
         poly = gpd.GeoDataFrame([fire_series], crs=poly_crs).copy()
-        poly = poly.to_crs("EPSG:4283")
+        
+        # Transform geometry to EPSG:4283 if needed (they should all be 4283 allready
+        if poly.crs.to_epsg() != 4283:
+            poly = poly.to_crs('EPSG:4283')
 
         attributes = self._extract_attribute_values(fire_series)
 
@@ -58,21 +61,41 @@ class BurnSeverityProcessor:
         )
 
         fire_date = attributes.get("ignition_date")
+        #use 
         if not fire_date:
             fallback_raw = self._first_valid_value(
                 fire_series, ("capt_date", "capture_date", "capture_da")
             )
+            #flag we are using capture date not ignition date
+            pre_fire_buffer = self.burn_config.pre_fire_buffer_days
             fire_date = self._process_date(fallback_raw)
+            if fire_date:
+                #adjust fire date IF using capture rather than ignition
+                #I hope this works if capture date is missing rather than just failling
+                fire_date = (
+                    datetime.strptime(fire_date, "%Y-%m-%d")
+                    - timedelta(days=self.burn_config.adjustment_missing_ignit_date)
+                    ).strftime("%Y-%m-%d")
+                
+            
         if not fire_date:
             raise ValueError(
                 f"Could not determine ignition date for fire '{fire_display_name}'."
             )
 
-        extinguish_date_value = attributes.get("date_retrieved") or attributes.get(
-            "extinguish_date"
-        )
-        extinguish_date = extinguish_date_value if extinguish_date_value else "None"
 
+        process_date_value = attributes.get("date_processed")
+
+        if process_date_value:
+            extinguish_date = (
+                datetime.strptime(process_date_value, "%Y-%m-%d") - timedelta(days=7)
+                ).strftime("%Y-%m-%d")
+        else:
+            raise ValueError(
+                f"Could not determine extinguish date for fire '{fire_display_name}'."
+            )
+
+            
         start_date_pre = (
             datetime.strptime(fire_date, "%Y-%m-%d")
             - timedelta(days=self.burn_config.pre_fire_buffer_days)
@@ -113,7 +136,7 @@ class BurnSeverityProcessor:
             dc,
             gpgon,
             time=(start_date_post, end_date_post),
-            min_gooddata_thresholds=(0.90,),
+            min_gooddata_thresholds=(0.90,0.50,0.20),
         )
         if post.time.size == 0:
             if log_path:
@@ -143,7 +166,23 @@ class BurnSeverityProcessor:
             group_by="solar_day",
             dask_chunks={},
         )
-        if landcover.time.size == 0:
+        #if dc.load fails to load landcover unfortunatly checking via time.size will throw error :(
+        if not landcover.dims:
+            #add a new landcover check that trys the year before incase anual updates are late :/
+            prev_landcover_year = str(int(landcover_year) - 1)
+            #try to load the previous callendar year of landcover data if it didn't work.
+            #we only try this once, not indefinantly
+            landcover = dc.load(
+                product="ga_ls_landcover_class_cyear_3",
+                geopolygon=gpgon,
+                time=(prev_landcover_year),
+                output_crs=StaticBurnConfig.output_crs,
+                resolution=StaticBurnConfig.resolution,
+                group_by="solar_day",
+                dask_chunks={},
+                )
+            #if landcover still empty allow fail.
+        if not landcover.dims:
             if log_path:
                 yy = int(closest_bl.sizes.get("y", 0))
                 xx = int(closest_bl.sizes.get("x", 0))
@@ -234,7 +273,7 @@ class BurnSeverityProcessor:
         print("Vectorizing severity raster...")
         severity_vectors = xr_vectorize(
             final_severity,
-            attribute_col="severity",
+            attribute_col="severity_rating",
             crs=StaticBurnConfig.output_crs,
             mask=final_severity != 0,
         )
@@ -242,12 +281,28 @@ class BurnSeverityProcessor:
             print("No burn area detected for this fire.")
             return None
 
-        severity_vectors = severity_vectors.to_crs("EPSG:4283")
-        clipped = severity_vectors.clip(
-            gpd.GeoDataFrame([fire_series], crs=poly_crs).to_crs("EPSG:4283")
-        )
+        #reproject burn extent
+        albers_extent = gpd.GeoDataFrame([fire_series], crs=poly_crs).to_crs("EPSG:3577")
 
-        aggregated = clipped.dissolve(by="severity").reset_index()
+        #check severity is albers
+        if severity_vectors.crs.to_epsg() != 3577:
+            severity_vectors = severity_vectors.to_crs('EPSG:3577')
+        #clip severity output to fire extent in albers
+        clipped = severity_vectors.clip(albers_extent)
+
+        aggregated = clipped.dissolve(by="severity_rating").reset_index()
+
+                #calculate and add area 
+        aggregated['area_ha'] = round((aggregated['geometry'].area)/10000, 2)
+        
+        #calculate and add perimiter (length measures perimiter of a multipoly)
+        aggregated['perim_km'] =round((aggregated['geometry'].length)/1000, 2)
+    
+        #add severity lable attribues as desiered 
+        aggregated['severity_class'] = aggregated['severity_rating'].map(StaticBurnConfig.severity_class_name)
+    
+        #add our assumed extinguish date to shapefile
+        aggrigated_severity['extinguish_date'] = extinguish_date
 
         if fire_id is not None:
             aggregated["fire_id"] = fire_id
@@ -300,7 +355,7 @@ class BurnSeverityProcessor:
             if not os.path.exists(path) or os.path.getsize(path) == 0:
                 return False
             gdf = gpd.read_file(path)
-            return (len(gdf) > 0) and ("severity" in gdf.columns)
+            return (len(gdf) > 0) and ("severity_rating" in gdf.columns)
         except Exception:
             return False
 
@@ -410,7 +465,7 @@ class BurnSeverityProcessor:
         if not date_value:
             date_value = datetime.utcnow().strftime("%Y-%m-%d")
         fire_id_for_save = f"{identifier}_{date_value}"
-        return fire_id_for_save, f"DEA_burn_severity_{fire_id_for_save}.json"
+        return fire_id_for_save, f"DEA_burn_severity_{fire_id_for_save}.geojson"
 
     def _build_vector_filename(self,
         fire_series: pd.Series, attributes: dict[str, Any], fallback_slug: str
