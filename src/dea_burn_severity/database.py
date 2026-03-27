@@ -3,6 +3,7 @@ Database access helpers for burn severity processing.
 """
 
 from __future__ import annotations
+from psycopg2.extras import execute_values
 
 import json
 from datetime import date, timedelta
@@ -74,30 +75,39 @@ class JobStatusTable:
                 )
             )
 
-    # TODO make this take a batch
-    def set_job_status(self, uid: int, status: str, message: str | None):
+    def set_job_status(self, entries: list[tuple[list[int], str, str | None]]):
         """Set the status and message for a job."""
 
         if not self.db.burn_config.db_use_status_table:
             return
 
-        with self.db._get_conn() as con, con.cursor() as cursor:
-            cursor.execute(
-                sql.SQL(
-                    """
-                    UPDATE {status_table}
-                    SET status  = {status},
-                        message = {message},
-                        lastmod = now()
-                    WHERE trigger_uid = $1;
+        # Flatten the input entries
+        rows: list[tuple[int, str, str | None]] = []
 
-                """
-                ).format(
-                    status_table=self.status_table_identifier,
-                    status=sql.Literal(status),
-                    message=sql.Literal(message),
-                )
+        for uids, status, message in entries:
+            rows.extend((uid, status, message) for uid in uids)
+
+        with self.db._get_conn() as con, con.cursor() as cursor:
+            query = sql.SQL("""
+                UPDATE {status_table} AS js
+                SET status  = v.status,
+                    message = v.message,
+                    lastmod = now()
+                FROM (VALUES %s) AS v(trigger_uid, status, message)
+                WHERE js.trigger_uid = v.trigger_uid
+            """).format(status_table=self.status_table_identifier)
+
+            execute_values(
+                cursor,
+                query.as_string(cursor),
+                rows,
+                page_size=1000,
             )
+            
+            con.commit()
+            
+        print(f"Updated status for {len(rows)} entries")
+
 
     def report_status(self):
         """Return a textual report with stats on what the current state of the system is."""
@@ -275,10 +285,9 @@ class InputDatabase:
 
         if len(failed_geo) > 0:
             print(f"Skipped {len(failed_geo)} rows due to geometry parsing errors.")
-            for uid in failed_geo:
-                self.job_status_table.set_job_status(
-                    uid, "SKIPPED", "Unparsable geometry"
-                )
+            self.job_status_table.set_job_status(
+                [(failed_geo, "SKIPPED", "Unparsable geometry")]
+            )
         if not records:
             return gpd.GeoDataFrame(
                 columns=[*InputDatabase.DB_COLUMNS, "geometry"],
@@ -316,7 +325,7 @@ class InputDatabase:
         """
         removed_entries = []
         # filter on size
-        # TODO mark everything filtered out of here as a "won't do" with the right reason.
+
         print(f"Started with: {len(poly)}")
 
         small_entries = poly[poly.area_ha < self.burn_config.fire_area_minimum_ha]
@@ -324,7 +333,7 @@ class InputDatabase:
             (
                 small_entries.uid.tolist(),
                 "SKIPPED",
-                f"Area smaller than {self.burn_config.fire_area_minimum_ha}",
+                f"Area smaller than {self.burn_config.fire_area_minimum_ha} ha",
             )
         )
 
@@ -347,11 +356,10 @@ class InputDatabase:
 
         unique_fire_ids = list(set(filtered["fire_id"]))
 
-        # TODO we need to capture the ones that got dropped so we can mark them as won't do
         filtered, dissolved_entries = perform_spatial_dissolve(
             filtered, unique_fire_ids
         )
-        removed_entries.append(dissolved_entries)
+        removed_entries.extend(dissolved_entries)
         print(f"After dissolving overlapping entries: {len(filtered)}")
 
         # Age filtering
@@ -376,10 +384,8 @@ class InputDatabase:
         print(
             f"After removing fires processed <{self.burn_config.post_fire_window_days} days ago: {len(filtered)}"
         )
-        
-        # TODO implement
-        # self.job_status_table.set_job_status(removed_entries)
-            
+
+        self.job_status_table.set_job_status(removed_entries)
 
         return filtered
 
@@ -387,7 +393,7 @@ class InputDatabase:
 # Taken from notebook helper
 def perform_spatial_dissolve(
     poly: pd.DataFrame, id_list: list[str]
-) -> tuple[gpd.GeoDataFrame, list[tuple[list[int], str]]]:
+) -> tuple[gpd.GeoDataFrame, list[tuple[list[int], str, str]]]:
     """takes a list of ids and the corrosponding geopandas dataframe and checks for spatial overlap
     to see if polygons are actually the same fire or not"""
 
