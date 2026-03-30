@@ -1,4 +1,4 @@
-from dea_burn_severity.database import InputDatabase
+from dea_burn_severity.database import InputDatabase, JobStatus
 import os
 import re
 import shutil
@@ -24,6 +24,7 @@ from .severity import calculate_severity, create_debug_mask
 class BurnSeverityProcessor:
     def __init__(self, config: RuntimeBurnConfig):
         self.burn_config = config
+        self.job_status_table = InputDatabase(config).job_status_table
 
     def process_single_fire(
         self,
@@ -46,12 +47,15 @@ class BurnSeverityProcessor:
         gpgon = Geometry(fire_series.geometry, crs=poly_crs)
 
         poly = gpd.GeoDataFrame([fire_series], crs=poly_crs).copy()
-        
+
         # Transform geometry to EPSG:4283 if needed (they should all be 4283 allready
         if poly.crs.to_epsg() != 4283:
-            poly = poly.to_crs('EPSG:4283')
+            poly = poly.to_crs("EPSG:4283")
 
         attributes = self._extract_attribute_values(fire_series)
+
+        # Unique fire id for status writing.
+        fire_uid = fire_series.uid
 
         # TODO need to clean up ids and dates, they are all over the place between both of them.
         fire_id = attributes.get("fire_id")
@@ -61,25 +65,27 @@ class BurnSeverityProcessor:
             str(fire_name_value).strip() if fire_name_value else fire_slug
         )
 
-        fire_date = attributes.get("ignition_date")
-        #use 
+        fire_date: Any | None = attributes.get("ignition_date")
+        # use
         if not fire_date:
             fallback_raw = self._first_valid_value(
                 fire_series, ("capt_date", "capture_date", "capture_da")
             )
-            #flag we are using capture date not ignition date
+            # flag we are using capture date not ignition date
             pre_fire_buffer = self.burn_config.pre_fire_buffer_days
             fire_date = self._process_date(fallback_raw)
             if fire_date:
-                #adjust fire date IF using capture rather than ignition
-                #I hope this works if capture date is missing rather than just failling
+                # adjust fire date IF using capture rather than ignition
+                # I hope this works if capture date is missing rather than just failling
                 fire_date = (
                     datetime.strptime(fire_date, "%Y-%m-%d")
                     - timedelta(days=self.burn_config.adjustment_missing_ignit_date)
-                    ).strftime("%Y-%m-%d")
-                
-            
+                ).strftime("%Y-%m-%d")
+
         if not fire_date:
+            self.job_status_table.set_job_status(
+                fire_uid, JobStatus.FAILED, "No ignition date"
+            )
             raise ValueError(
                 f"Could not determine ignition date for fire '{fire_display_name}'."
             )
@@ -89,13 +95,15 @@ class BurnSeverityProcessor:
         if process_date_value:
             extinguish_date = (
                 datetime.strptime(process_date_value, "%Y-%m-%d") - timedelta(days=7)
-                ).strftime("%Y-%m-%d")
+            ).strftime("%Y-%m-%d")
         else:
+            self.job_status_table.set_job_status(
+                fire_uid, JobStatus.FAILED, "No ignition date"
+            )
             raise ValueError(
                 f"Could not determine extinguish date for fire '{fire_display_name}'."
             )
 
-            
         start_date_pre = (
             datetime.strptime(fire_date, "%Y-%m-%d")
             - timedelta(days=self.burn_config.pre_fire_buffer_days)
@@ -118,11 +126,11 @@ class BurnSeverityProcessor:
         ).strftime("%Y-%m-%d")
 
         landcover_year = str(int(fire_date[0:4]) - 1)
-        
+
         # add in saftynet for landcover when new year starts. remove when 2025 landcover is published
         # TODO Cate - review this, it wasn't in the old code
         if int(landcover_year) > 2024:
-            landcover_year = '2024'
+            landcover_year = "2024"
 
         baseline, closest_bl = load_baseline_stack(
             dc, gpgon, time=(start_date_pre, end_date_pre)
@@ -134,14 +142,18 @@ class BurnSeverityProcessor:
                     f"{fire_display_name}\tbaseline_scenes=0\tpost_scenes=0\tgrid=0x0"
                     "\ttotal_px=0\tvalid_px=0\tburn_px=0\tmasked_px=0",
                 )
+            # TODO Cate - should this be retried in the future or will it never succeed?
             print("No baseline data for this fire. Skipping.")
+            self.job_status_table.set_job_status(
+                fire_uid, JobStatus.FAILED, "No baseline data"
+            )
             return None
 
         post = load_ard_with_fallback(
             dc,
             gpgon,
             time=(start_date_post, end_date_post),
-            min_gooddata_thresholds=(0.90,0.50,0.20),
+            min_gooddata_thresholds=(0.90, 0.50, 0.20),
         )
         if post.time.size == 0:
             if log_path:
@@ -160,6 +172,11 @@ class BurnSeverityProcessor:
                     "\tburn_px=0\tmasked_px=0",
                 )
             print("No post-fire data for this fire. Skipping.")
+
+            # TODO Cate - should this be retried in the future or will it never succeed?
+            self.job_status_table.set_job_status(
+                fire_uid, JobStatus.FAILED, "No post-fire data"
+            )
             return None
 
         landcover = dc.load(
@@ -171,12 +188,12 @@ class BurnSeverityProcessor:
             group_by="solar_day",
             dask_chunks={},
         )
-        #if dc.load fails to load landcover unfortunatly checking via time.size will throw error :(
+        # if dc.load fails to load landcover unfortunatly checking via time.size will throw error :(
         if not landcover.dims:
-            #add a new landcover check that trys the year before incase anual updates are late :/
+            # add a new landcover check that trys the year before incase anual updates are late :/
             prev_landcover_year = str(int(landcover_year) - 1)
-            #try to load the previous callendar year of landcover data if it didn't work.
-            #we only try this once, not indefinantly
+            # try to load the previous callendar year of landcover data if it didn't work.
+            # we only try this once, not indefinantly
             landcover = dc.load(
                 product="ga_ls_landcover_class_cyear_3",
                 geopolygon=gpgon,
@@ -185,8 +202,8 @@ class BurnSeverityProcessor:
                 resolution=StaticBurnConfig.resolution,
                 group_by="solar_day",
                 dask_chunks={},
-                )
-            #if landcover still empty allow fail.
+            )
+            # if landcover still empty allow fail.
         if not landcover.dims:
             if log_path:
                 yy = int(closest_bl.sizes.get("y", 0))
@@ -200,6 +217,10 @@ class BurnSeverityProcessor:
                     "\tlandcover=missing",
                 )
             print(f"No landcover data for year {landcover_year}. Skipping.")
+            # TODO Cate - should this be retried in the future or will it never succeed?
+            self.job_status_table.set_job_status(
+                fire_uid, JobStatus.FAILED, "No landcover data"
+            )
             return None
         landcover = landcover.isel(time=0)
 
@@ -210,7 +231,9 @@ class BurnSeverityProcessor:
         min_post_nbr = post_nbr.min("time")
         delta_nbr = pre_nbr - min_post_nbr
 
-        severity = calculate_severity(delta_nbr, landcover, StaticBurnConfig.grass_classes)
+        severity = calculate_severity(
+            delta_nbr, landcover, StaticBurnConfig.grass_classes
+        )
 
         debug_mask = create_debug_mask(closest_bl, post)
         final_severity = severity.where(debug_mask == 0, 6)
@@ -281,33 +304,41 @@ class BurnSeverityProcessor:
             attribute_col="severity_rating",
             crs=StaticBurnConfig.output_crs,
         )
-        #remove mask by 0, we actually want to vectorise all values even 0
+        # remove mask by 0, we actually want to vectorise all values even 0
         if severity_vectors.empty:
             print("No burn area detected for this fire.")
+            # TODO Cate - should this be retried in the future or will it never succeed?
+            self.job_status_table.set_job_status(
+                fire_uid, JobStatus.FAILED, "No burn area detected"
+            )
             return None
 
-        #reproject burn extent
-        albers_extent = gpd.GeoDataFrame([fire_series], crs=poly_crs).to_crs("EPSG:3577")
+        # reproject burn extent
+        albers_extent = gpd.GeoDataFrame([fire_series], crs=poly_crs).to_crs(
+            "EPSG:3577"
+        )
 
-        #check severity is albers
+        # check severity is albers
         if severity_vectors.crs.to_epsg() != 3577:
-            severity_vectors = severity_vectors.to_crs('EPSG:3577')
-        #clip severity output to fire extent in albers
+            severity_vectors = severity_vectors.to_crs("EPSG:3577")
+        # clip severity output to fire extent in albers
         clipped = severity_vectors.clip(albers_extent)
 
         aggregated = clipped.dissolve(by="severity_rating").reset_index()
 
-                #calculate and add area 
-        aggregated['area_ha'] = round((aggregated['geometry'].area)/10000, 2)
-        
-        #calculate and add perimiter (length measures perimiter of a multipoly)
-        aggregated['perim_km'] =round((aggregated['geometry'].length)/1000, 2)
-    
-        #add severity lable attribues as desiered 
-        aggregated['severity_class'] = aggregated['severity_rating'].map(StaticBurnConfig.severity_class_name)
-    
-        #add our assumed extinguish date to shapefile
-        aggregated['extinguish_date'] = extinguish_date
+        # calculate and add area
+        aggregated["area_ha"] = round((aggregated["geometry"].area) / 10000, 2)
+
+        # calculate and add perimiter (length measures perimiter of a multipoly)
+        aggregated["perim_km"] = round((aggregated["geometry"].length) / 1000, 2)
+
+        # add severity lable attribues as desiered
+        aggregated["severity_class"] = aggregated["severity_rating"].map(
+            StaticBurnConfig.severity_class_name
+        )
+
+        # add our assumed extinguish date to shapefile
+        aggregated["extinguish_date"] = extinguish_date
 
         if fire_id is not None:
             aggregated["fire_id"] = fire_id
@@ -319,7 +350,14 @@ class BurnSeverityProcessor:
         )
 
         for key, value in attributes.items():
-            if key in {"fire_id", "fire_name", "ignition_date", "extinguish_date", "area_ha", "perim_km"}:
+            if key in {
+                "fire_id",
+                "fire_name",
+                "ignition_date",
+                "extinguish_date",
+                "area_ha",
+                "perim_km",
+            }:
                 continue
             aggregated[key] = value
 
@@ -455,8 +493,8 @@ class BurnSeverityProcessor:
         shutil.rmtree(local_dir, ignore_errors=True)
         return True
 
-    def _format_results_filename(self,
-        identifier_source: Any | None, date_source: Any | None, fallback_slug: str
+    def _format_results_filename(
+        self, identifier_source: Any | None, date_source: Any | None, fallback_slug: str
     ) -> tuple[str, str]:
         """Return file-friendly identifier/date tuple for DEA outputs."""
         identifier = (
@@ -472,12 +510,14 @@ class BurnSeverityProcessor:
         fire_id_for_save = f"{identifier}_{date_value}"
         return fire_id_for_save, f"DEA_burn_severity_{fire_id_for_save}.geojson"
 
-    def _build_vector_filename(self,
-        fire_series: pd.Series, attributes: dict[str, Any], fallback_slug: str
+    def _build_vector_filename(
+        self, fire_series: pd.Series, attributes: dict[str, Any], fallback_slug: str
     ) -> tuple[str, str]:
         identifier_src = attributes.get("fire_id")
         if identifier_src in (None, ""):
-            identifier_src = self._first_valid_value(fire_series, InputDatabase.FIRE_ID_FIELDS)
+            identifier_src = self._first_valid_value(
+                fire_series, InputDatabase.FIRE_ID_FIELDS
+            )
         processed_date_src = attributes.get("date_processed")
         if processed_date_src in (None, ""):
             processed_date_src = self._first_valid_value(
@@ -610,6 +650,10 @@ class BurnSeverityProcessor:
                         skip_due_to_output = True
 
             if skip_due_to_output:
+                # TODO check the status we want here, maybe compelte?
+                self.job_status_table.set_job_status(
+                    fire_series.uid, JobStatus.SKIPPED, "Output already exists"
+                )
                 continue
 
             print("\n" + "=" * 80)
@@ -631,14 +675,24 @@ class BurnSeverityProcessor:
                 fire_fail += 1
                 print(f"!!! FAILED to process fire '{base_fire_name}': {exc}")
                 traceback.print_exc()
+                self.job_status_table.set_job_status(
+                    fire_series.uid, JobStatus.FAILED, str(exc)
+                )
                 continue
 
             if upload_to_s3:
                 ok = self._upload_dir_to_s3_and_cleanup(fire_dir, s3_prefix)
                 if not ok:
+                    self.job_status_table.set_job_status(
+                        fire_series.uid, JobStatus.UNPROCESSED, "Upload failed"
+                    )
                     print(
                         f"[S3 upload] WARNING: '{fire_dir}' was not removed (upload verification failed)."
                     )
+                    continue
+            self.job_status_table.set_job_status(
+                fire_series.uid, JobStatus.COMPLETE, None
+            )
 
         print("\n" + "=" * 80)
         print("Batch processing complete.")
@@ -646,13 +700,3 @@ class BurnSeverityProcessor:
         print(f"  Fire failed:  {fire_fail}")
         print(f"  Fire skipped: {fire_skip}")
         print("=" * 88)
-
-    # for fire in list...
-    def map_burn_severity() -> None:
-        pass
-
-    def write_output() -> None:
-        # write cog
-        # write polyg on
-        # write to log
-        pass

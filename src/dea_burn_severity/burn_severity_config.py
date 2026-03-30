@@ -92,7 +92,7 @@ class StaticBurnConfig:
         97,
     ]
 
-    severity_class_name: dict[int: str] = {
+    severity_class_name: dict[int, str] = {
         0 : 'Unburnt',
         1 : 'Grass_extent',
         2 : 'Low',

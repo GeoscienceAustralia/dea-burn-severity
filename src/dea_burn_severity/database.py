@@ -3,7 +3,6 @@ Database access helpers for burn severity processing.
 """
 
 from __future__ import annotations
-from psycopg2.extras import execute_values
 
 import json
 from datetime import date, timedelta
@@ -14,9 +13,18 @@ import pandas as pd
 import psycopg2
 from psycopg2 import sql
 from psycopg2.extensions import connection
+from psycopg2.extras import execute_values
 from shapely.geometry import shape
 
 from dea_burn_severity.burn_severity_config import RuntimeBurnConfig
+
+
+class JobStatus:
+    UNPROCESSED: str = "UNPROCESSED"
+    COMPLETE: str = "COMPLETE"
+    SKIPPED_INVALID: str = "SKIPPED_INVALID"
+    SKIPPED: str = "SKIPPED"
+    FAILED: str = "FAILED"
 
 
 class JobStatusTable:
@@ -43,9 +51,11 @@ class JobStatusTable:
     
     ---
     Valid status values:
-        - UNPROCESSED (new, not ready)
+        - UNPROCESSED (new or not ready)
         - COMPLETE
-        - SKIPPED (invalid, merged) TODO do we want to split this into distinct things so we can tell what is actually busted vs merged?
+        - SKIPPED_INVALID
+        - SKIPPED (valid reason like merged together)
+        - FAILED (with reason)
     """
 
     def __init__(self, db: InputDatabase):
@@ -61,7 +71,7 @@ class JobStatusTable:
                 sql.SQL(
                     """
                     INSERT INTO {status_table} (trigger_uid, status, lastmod, message)
-                    SELECT t.uid, 'UNPROCESSED', now(), NULL
+                    SELECT t.uid, {status_value}, now(), NULL
                     FROM {trigger_table} t
                     WHERE NOT EXISTS (
                     SELECT 1
@@ -70,12 +80,16 @@ class JobStatusTable:
                     );
                 """
                 ).format(
+                    status_value=sql.Literal(JobStatus.UNPROCESSED),
                     trigger_table=self.db.table_identifier,
                     status_table=self.status_table_identifier,
                 )
             )
 
-    def set_job_status(self, entries: list[tuple[list[int], str, str | None]]):
+    def set_job_status(self, uid: int, status: str, message: str | None):
+        return self.set_job_status_bulk([([uid], status, message)])
+
+    def set_job_status_bulk(self, entries: list[tuple[list[int], str, str | None]]):
         """Set the status and message for a job."""
 
         if not self.db.burn_config.db_use_status_table:
@@ -103,11 +117,10 @@ class JobStatusTable:
                 rows,
                 page_size=1000,
             )
-            
-            con.commit()
-            
-        print(f"Updated status for {len(rows)} entries")
 
+            con.commit()
+
+        print(f"Updated status for {len(rows)} entries")
 
     def report_status(self):
         """Return a textual report with stats on what the current state of the system is."""
@@ -232,8 +245,9 @@ class InputDatabase:
 
             where_clause = sql.SQL("""
                 JOIN {status_table} js ON js.trigger_uid = t.uid
-                WHERE js.status = 'UNPROCESSED';""").format(
-                status_table=self.job_status_table.status_table_identifier
+                WHERE js.status = '{unprocessed_value}';""").format(
+                status_table=self.job_status_table.status_table_identifier,
+                unprocessed_value=sql.Literal(JobStatus.UNPROCESSED)
             )
         else:
             where_clause = sql.SQL("")
@@ -285,8 +299,8 @@ class InputDatabase:
 
         if len(failed_geo) > 0:
             print(f"Skipped {len(failed_geo)} rows due to geometry parsing errors.")
-            self.job_status_table.set_job_status(
-                [(failed_geo, "SKIPPED", "Unparsable geometry")]
+            self.job_status_table.set_job_status_bulk(
+                [(failed_geo, JobStatus.SKIPPED_INVALID, "Unparsable geometry")]
             )
         if not records:
             return gpd.GeoDataFrame(
@@ -332,7 +346,7 @@ class InputDatabase:
         removed_entries.append(
             (
                 small_entries.uid.tolist(),
-                "SKIPPED",
+                JobStatus.SKIPPED,
                 f"Area smaller than {self.burn_config.fire_area_minimum_ha} ha",
             )
         )
@@ -347,7 +361,7 @@ class InputDatabase:
         removed_entries.append(
             (
                 filtered.loc[~filtered.geometry.is_valid].uid.tolist(),
-                "SKIPPED",
+                JobStatus.SKIPPED_INVALID,
                 "Invalid geometry",
             )
         )
@@ -372,7 +386,7 @@ class InputDatabase:
         removed_entries.append(
             (
                 filtered[~(filtered.date_processed <= cutoff_date)].uid.tolist(),
-                "UNPROCESSED",
+                JobStatus.UNPROCESSED,
                 "Too new",
             )
         )
@@ -385,7 +399,7 @@ class InputDatabase:
             f"After removing fires processed <{self.burn_config.post_fire_window_days} days ago: {len(filtered)}"
         )
 
-        self.job_status_table.set_job_status(removed_entries)
+        self.job_status_table.set_job_status_bulk(removed_entries)
 
         return filtered
 
@@ -427,7 +441,7 @@ def perform_spatial_dissolve(
         dissolved_uids.remove(largest.uid)
         if len(dissolved_uids) > 0:
             removed_entries.append(
-                (dissolved_uids, "SKIPPED", f"Dissolved into {largest.uid}")
+                (dissolved_uids, JobStatus.SKIPPED, f"Dissolved into {largest.uid}")
             )
 
         agg = {
