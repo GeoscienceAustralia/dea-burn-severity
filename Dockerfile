@@ -18,7 +18,7 @@ RUN apt-get update && \
       python3-pip \
       libpq-dev \
       python3-dev \
-      postgresql-lib \
+    #   postgresql-lib \
       postgresql \
       postgresql-client \
       proj-bin \

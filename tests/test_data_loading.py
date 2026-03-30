@@ -3,13 +3,9 @@ from types import SimpleNamespace
 import numpy as np
 import xarray as xr
 
-from dea_burn_severity.configuration import DEFAULT_CONFIG_DICT, RuntimeConfig
 from dea_burn_severity import data_loading
 from dea_burn_severity.data_loading import load_ard_with_fallback, load_baseline_stack
 
-
-def _runtime_config() -> RuntimeConfig:
-    return RuntimeConfig.from_dict(DEFAULT_CONFIG_DICT)
 
 
 def _nonempty_dataset(value: float = 1.0) -> xr.Dataset:
@@ -38,7 +34,6 @@ def test_load_ard_with_fallback_returns_on_first_success(monkeypatch):
         dc=SimpleNamespace(),
         gpgon=SimpleNamespace(),
         time=("start", "end"),
-        config=_runtime_config(),
         min_gooddata_thresholds=(0.99, 0.9),
     )
 
@@ -71,7 +66,6 @@ def test_load_baseline_stack_builds_relaxed_composite(monkeypatch):
         dc=SimpleNamespace(),
         gpgon=SimpleNamespace(),
         time=("start", "end"),
-        config=_runtime_config(),
     )
 
     assert calls == [0.99, 0.2]

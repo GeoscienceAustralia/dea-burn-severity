@@ -245,7 +245,7 @@ class InputDatabase:
 
             where_clause = sql.SQL("""
                 JOIN {status_table} js ON js.trigger_uid = t.uid
-                WHERE js.status = '{unprocessed_value}';""").format(
+                WHERE js.status = {unprocessed_value};""").format(
                 status_table=self.job_status_table.status_table_identifier,
                 unprocessed_value=sql.Literal(JobStatus.UNPROCESSED)
             )
