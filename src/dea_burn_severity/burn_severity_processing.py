@@ -357,6 +357,8 @@ class BurnSeverityProcessor:
                 "extinguish_date",
                 "area_ha",
                 "perim_km",
+                "date_retrieved",
+                "date_processed",
             }:
                 continue
             aggregated[key] = value
