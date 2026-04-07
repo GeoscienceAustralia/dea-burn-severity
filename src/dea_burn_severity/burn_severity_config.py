@@ -8,7 +8,7 @@ class RuntimeBurnConfig:
     output_dir: str = "products"
     dc_app_name = "Burn_Severity"
     upload_to_s3: bool = False
-    upload_to_s3_bucket: str = os.getenv("FIRE_OUTPUT_BUCKET", "dea-public-data-dev")
+    upload_to_s3_bucket: str = os.getenv("FIRE_OUTPUT_BUCKET", "dea-bushfire-severity-dev")
     upload_to_s3_path: str = "projects/burn_cube/derivative/dea_burn_severity/result"
 
     fire_area_minimum_ha: int = 1

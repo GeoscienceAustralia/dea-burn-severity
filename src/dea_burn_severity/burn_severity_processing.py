@@ -604,7 +604,7 @@ class BurnSeverityProcessor:
                 base_fire_name = "fire"
 
             # Always append the fire UID to the name so it is unique for the row, even if the fire name is reused
-            base_fire_name += f"_{fire_uid}"
+            base_fire_name += f" {fire_uid}"
 
             base_fire_slug = self._clean_fire_slug(base_fire_name)
             if not base_fire_slug:
