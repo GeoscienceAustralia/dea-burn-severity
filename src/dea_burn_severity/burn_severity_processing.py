@@ -1,4 +1,3 @@
-from dea_burn_severity.database import InputDatabase, JobStatus
 import os
 import re
 import shutil
@@ -16,6 +15,7 @@ from dea_tools.bandindices import calculate_indices
 from dea_tools.spatial import xr_vectorize
 
 from dea_burn_severity.burn_severity_config import RuntimeBurnConfig, StaticBurnConfig
+from dea_burn_severity.database import InputDatabase, JobStatus
 
 from .data_loading import load_ard_with_fallback, load_baseline_stack
 from .severity import calculate_severity, create_debug_mask
@@ -593,18 +593,22 @@ class BurnSeverityProcessor:
         fire_success = fire_fail = fire_skip = 0
 
         print("\nBeginning per-fire processing (single polygon per feature)...")
-        for idx, fire_series in all_polys.iterrows():
+        for _, fire_series in all_polys.iterrows():
+            fire_uid = fire_series["uid"]
             fire_attrs = self._extract_attribute_values(fire_series)
             if fire_attrs.get("fire_name"):
                 base_fire_name = str(fire_attrs["fire_name"]).strip()
             elif fire_attrs.get("fire_id") is not None:
                 base_fire_name = f"fire_id_{fire_attrs['fire_id']}"
             else:
-                base_fire_name = f"fire_{idx}"
+                base_fire_name = "fire"
+
+            # Always append the fire UID to the name so it is unique for the row, even if the fire name is reused
+            base_fire_name += f"_{fire_uid}"
 
             base_fire_slug = self._clean_fire_slug(base_fire_name)
             if not base_fire_slug:
-                base_fire_slug = f"fire_{idx}"
+                base_fire_slug = f"fire_{fire_uid}"
             base_fire_slug = base_fire_slug.replace(os.sep, "_")
             if os.altsep:
                 base_fire_slug = base_fire_slug.replace(os.altsep, "_")
@@ -624,7 +628,7 @@ class BurnSeverityProcessor:
             if not os.path.exists(log_path):
                 self._append_log(
                     log_path,
-                    f"# Processing log for {base_fire_name} (feature index {idx})",
+                    f"# Processing log for {base_fire_name} (uid {fire_uid})",
                 )
                 self._append_log(
                     log_path,
