@@ -4,6 +4,8 @@ Database access helpers for burn severity processing.
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 from datetime import date, timedelta
 from typing import Any
@@ -122,9 +124,33 @@ class JobStatusTable:
 
         print(f"Updated status for {len(rows)} entries")
 
-    def report_status(self):
-        """Return a textual report with stats on what the current state of the system is."""
-        # TODO implement
+    def _print_result_as_csv(self, cursor):
+        rows = cursor.fetchall()
+        headers = [desc[0] for desc in cursor.description]
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(headers)
+        writer.writerows(rows)
+
+        print(buffer.getvalue())
+
+    def report_status(self, summary_only=True):
+        """Return a textual status with stats on what the current state of the system is."""
+        with self.db._get_conn() as con, con.cursor() as cursor:
+            query = sql.SQL(
+                "SELECT status, count(1)  from {status_table} GROUP BY status"
+            ).format(status_table=self.status_table_identifier)
+            cursor.execute(query)
+            self._print_result_as_csv(cursor)
+            
+            if summary_only:
+                return
+
+            query = sql.SQL(
+                "SELECT * from {status_table} where status IN  ('FAILED', 'SKIPPED_INVALID');"
+            ).format(status_table=self.status_table_identifier)
+            cursor.execute(query)
+            self._print_result_as_csv(cursor)
         pass
 
 
@@ -247,7 +273,7 @@ class InputDatabase:
                 JOIN {status_table} js ON js.trigger_uid = t.uid
                 WHERE js.status = {unprocessed_value};""").format(
                 status_table=self.job_status_table.status_table_identifier,
-                unprocessed_value=sql.Literal(JobStatus.UNPROCESSED)
+                unprocessed_value=sql.Literal(JobStatus.UNPROCESSED),
             )
         else:
             where_clause = sql.SQL("")
