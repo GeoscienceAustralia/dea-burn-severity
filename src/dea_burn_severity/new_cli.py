@@ -5,7 +5,7 @@ from dea_burn_severity.database import InputDatabase
 
 def cli() -> None:
 
-    config = RuntimeBurnConfig(db_use_status_table=True)
+    config = RuntimeBurnConfig(db_use_status_table=True, upload_to_s3=True)
     database = InputDatabase(config)
 
     polygons = database.load_filtered_polygons()

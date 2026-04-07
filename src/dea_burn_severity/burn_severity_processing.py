@@ -567,7 +567,8 @@ class BurnSeverityProcessor:
         print(f"All outputs will be saved to: {self.burn_config.output_dir}")
 
         upload_to_s3 = self.burn_config.upload_to_s3
-        s3_prefix = self.burn_config.upload_to_s3_prefix
+        s3_prefix = f"s3://{self.burn_config.upload_to_s3_bucket}/{self.burn_config.upload_to_s3_path}"
+
         s3_fs = None
         if upload_to_s3:
             try:
