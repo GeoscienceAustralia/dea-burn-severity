@@ -450,47 +450,29 @@ class BurnSeverityProcessor:
             return f"{digits[0:4]}-{digits[4:6]}-{digits[6:8]}"
         return None
 
-    def _upload_dir_to_s3_and_cleanup(self, local_dir: str, s3_prefix: str) -> bool:
+    def _upload_product_to_s3(self, file_path: str, s3_prefix: str):
+        if not os.path.exists(file_path):
+            print(f"[S3 upload] File does not exist: {file_path}")
+            return False
+
+        import boto3
+
+        bucket, key_prefix = self._parse_s3_uri(s3_prefix)
+        dest_dir_key = key_prefix.strip("/")
+        remote_key = f"{dest_dir_key}/{os.path.basename(file_path)}"
+
+        s3_client = boto3.client("s3")
+        s3_client.upload_file(Filename=str(file_path), Bucket=bucket, Key=remote_key)
+        print(f"[S3 upload] File uploaded to: {remote_key}")
+        return True
+
+    def _cleanup(self, local_dir: str) -> bool:
         """
-        Upload local_dir recursively into the supplied S3 prefix and, on success,
-        delete local_dir. All files land directly under the configured prefix, so
-        there is a single folder on S3 for every fire's artefacts.
+        Clean up the local_dir.
         """
         if not os.path.isdir(local_dir):
             print(f"[S3 upload] Local directory does not exist: {local_dir}")
             return False
-
-        import s3fs  # type: ignore
-
-        bucket, key_prefix = self._parse_s3_uri(s3_prefix)
-        dest_dir_key = key_prefix.strip("/")
-
-        fs = s3fs.S3FileSystem(anon=False)
-
-        local_files: list[tuple[str, int, str]] = []
-        for root, _, files in os.walk(local_dir):
-            for name in files:
-                full = os.path.join(root, name)
-                rel = os.path.relpath(full, local_dir).replace("\\", "/")
-                size = os.path.getsize(full)
-                local_files.append((rel, size, full))
-
-        if not local_files:
-            print(f"[S3 upload] Nothing to upload from {local_dir}")
-            return False
-
-        if dest_dir_key:
-            target_display = f"s3://{bucket}/{dest_dir_key}/"
-        else:
-            target_display = f"s3://{bucket}/"
-
-        print(f"[S3 upload] Uploading '{local_dir}' -> '{target_display}' ...")
-        for rel, _, full in local_files:
-            if dest_dir_key:
-                remote_key = f"{dest_dir_key}/{rel}"
-            else:
-                remote_key = rel
-            fs.put(full, f"{bucket}/{remote_key}")
 
         shutil.rmtree(local_dir, ignore_errors=True)
         return True
@@ -688,7 +670,8 @@ class BurnSeverityProcessor:
                 continue
 
             if upload_to_s3:
-                ok = self._upload_dir_to_s3_and_cleanup(fire_dir, s3_prefix)
+                ok = self._upload_product_to_s3(final_vector_path, s3_prefix)
+                self._cleanup(fire_dir)
                 if not ok:
                     self.job_status_table.set_job_status(
                         fire_series.uid, JobStatus.UNPROCESSED, "Upload failed"
