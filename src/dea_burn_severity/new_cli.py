@@ -1,11 +1,11 @@
-from dea_burn_severity.burn_severity_config import RuntimeBurnConfig
-from dea_burn_severity.burn_severity_processing import BurnSeverityProcessor
-from dea_burn_severity.database import InputDatabase
+from .burn_severity_config import RuntimeBurnConfig
+from .burn_severity_processing import BurnSeverityProcessor
+from .database import InputDatabase
 
 
 def cli() -> None:
 
-    config = RuntimeBurnConfig(db_use_status_table=True, upload_to_s3=True)
+    config = RuntimeBurnConfig(db_use_status_table=False, upload_to_s3=False)
     database = InputDatabase(config)
 
     polygons = database.load_filtered_polygons()

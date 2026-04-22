@@ -14,8 +14,8 @@ from datacube.utils.geometry import CRS, Geometry
 from dea_tools.bandindices import calculate_indices
 from dea_tools.spatial import xr_vectorize
 
-from dea_burn_severity.burn_severity_config import RuntimeBurnConfig, StaticBurnConfig
-from dea_burn_severity.database import InputDatabase, JobStatus
+from .burn_severity_config import RuntimeBurnConfig, StaticBurnConfig
+from .database import InputDatabase, JobStatus
 
 from .data_loading import load_ard_with_fallback, load_baseline_stack
 from .severity import calculate_severity, create_debug_mask
