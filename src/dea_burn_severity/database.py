@@ -18,7 +18,7 @@ from psycopg2.extensions import connection
 from psycopg2.extras import execute_values
 from shapely.geometry import shape
 
-from dea_burn_severity.burn_severity_config import RuntimeBurnConfig
+from .burn_severity_config import RuntimeBurnConfig
 
 
 class JobStatus:

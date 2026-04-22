@@ -1,6 +1,6 @@
-from dea_burn_severity.burn_severity_config import RuntimeBurnConfig
-from dea_burn_severity.burn_severity_processing import BurnSeverityProcessor
-from dea_burn_severity.database import InputDatabase
+from .burn_severity_config import RuntimeBurnConfig
+from .burn_severity_processing import BurnSeverityProcessor
+from .database import InputDatabase
 
 
 def cli() -> None:
