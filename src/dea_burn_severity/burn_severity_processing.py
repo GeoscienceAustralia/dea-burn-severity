@@ -153,7 +153,7 @@ class BurnSeverityProcessor:
             dc,
             gpgon,
             time=(start_date_post, end_date_post),
-            min_gooddata_thresholds=(0.90, 0.50, 0.20),
+            min_gooddata_thresholds=(0.50, 0.10),
         )
         if post.time.size == 0:
             if log_path:
