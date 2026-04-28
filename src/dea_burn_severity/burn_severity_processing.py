@@ -342,7 +342,7 @@ class BurnSeverityProcessor:
 
         if fire_id is not None:
             aggregated["fire_id"] = fire_id
-        aggregated["fire_name"] = fire_name_value or fire_slug
+        aggregated["fire_name"] = fire_name_value
         aggregated["ignition_date"] = fire_date
         aggregated["extinguish_date"] = extinguish_date
         fire_id_for_save, vector_filename = self._build_vector_filename(
