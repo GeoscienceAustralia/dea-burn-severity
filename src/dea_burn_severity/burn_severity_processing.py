@@ -66,6 +66,10 @@ class BurnSeverityProcessor:
         )
 
         fire_date: Any | None = attributes.get("ignition_date")
+
+        #this attribute is for the output shape, we want to retain empty value if value is none
+        output_ig_date = fire_date
+        
         # use
         if not fire_date:
             fallback_raw = self._first_valid_value(
@@ -343,8 +347,8 @@ class BurnSeverityProcessor:
         if fire_id is not None:
             aggregated["fire_id"] = fire_id
         aggregated["fire_name"] = fire_name_value
-        aggregated["ignition_date"] = fire_date
-        aggregated["extinguish_date"] = extinguish_date
+        aggregated["ignition_date"] = output_ig_date
+        # aggregated["extinguish_date"] = extinguish_date
         fire_id_for_save, vector_filename = self._build_vector_filename(
             fire_series=fire_series, attributes=attributes, fallback_slug=fire_slug
         )
