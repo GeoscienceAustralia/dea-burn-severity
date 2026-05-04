@@ -131,11 +131,6 @@ class BurnSeverityProcessor:
 
         landcover_year = str(int(fire_date[0:4]) - 1)
 
-        # add in saftynet for landcover when new year starts. remove when 2025 landcover is published
-        # TODO Cate - review this, it wasn't in the old code
-        if int(landcover_year) > 2024:
-            landcover_year = "2024"
-
         baseline, closest_bl = load_baseline_stack(
             dc, gpgon, time=(start_date_pre, end_date_pre)
         )
@@ -192,12 +187,11 @@ class BurnSeverityProcessor:
             group_by="solar_day",
             dask_chunks={},
         )
-        # if dc.load fails to load landcover unfortunatly checking via time.size will throw error :(
+
         if not landcover.dims:
             # add a new landcover check that trys the year before incase anual updates are late :/
             prev_landcover_year = str(int(landcover_year) - 1)
-            # try to load the previous callendar year of landcover data if it didn't work.
-            # we only try this once, not indefinantly
+
             landcover = dc.load(
                 product="ga_ls_landcover_class_cyear_3",
                 geopolygon=gpgon,
