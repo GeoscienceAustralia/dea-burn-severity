@@ -62,7 +62,7 @@ class BurnSeverityProcessor:
         fire_name_value = attributes.get("fire_name")
         fire_slug = unique_fire_name
         fire_display_name = (
-            str(fire_name_value).strip() if fire_name_value else fire_slug
+            str(fire_name_value).strip() if fire_name_value else 
         )
 
         fire_date: Any | None = attributes.get("ignition_date")
