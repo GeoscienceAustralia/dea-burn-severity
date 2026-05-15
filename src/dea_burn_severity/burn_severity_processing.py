@@ -342,7 +342,7 @@ class BurnSeverityProcessor:
             aggregated["fire_id"] = fire_id
         aggregated["fire_name"] = fire_name_value
         aggregated["ignition_date"] = output_ig_date
-        aggregated["capt_method"] = attributes. Get("capt_method")
+        aggregated["capt_method"] = attributes.get("capt_method")
         # aggregated["extinguish_date"] = extinguish_date
         fire_id_for_save, vector_filename = self._build_vector_filename(
             fire_series=fire_series, attributes=attributes, fallback_slug=fire_slug
